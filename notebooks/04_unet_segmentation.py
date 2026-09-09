@@ -233,8 +233,8 @@ print(Y_test.shape)   # (1, 8, 128, 128) : les canaux doublent, la taille ne bou
 """Now write a class for the encoder that uses this function.
 
 **Point crucial pour la suite.** L'encodeur doit renvoyer les features
-**AVANT** le max-pooling, et non apres. C'est l'erreur que j'avais faite au
-depart. Pourquoi ? Parce que les skip connections servent a re-injecter dans le
+**AVANT** le max-pooling, et non apres. Pourquoi ? Parce que les skip
+connections servent a re-injecter dans le
 decodeur les details spatiaux **a pleine resolution** de chaque niveau. Si on
 renvoie la version deja sous-echantillonnee, les dimensions ne correspondent
 plus au moment de la concatenation, et surtout on perd precisement
@@ -307,7 +307,7 @@ print("sortie du bottleneck :", bn(out).shape)   # (1, 64, 8, 8) pour F=4
 
 **TODO**: write the corresponding module and test if it works properly. Check the output dimensions.
 
-Deux pieges dans lesquels j'etais tombe :
+Deux pieges classiques a ce stade :
 
 1. `th.cat` prend une **liste** de tenseurs et un axe :
    `th.cat([a, b], dim=1)` et non `th.cat(a, b)`. `dim=1` est l'axe des

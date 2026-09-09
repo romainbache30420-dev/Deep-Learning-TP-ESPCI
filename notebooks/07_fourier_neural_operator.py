@@ -717,7 +717,7 @@ Comparez directement aux résultats U-Net.
 """
 
 def make_fno(kind="tfno", n_modes=None, hidden_channels=None, n_layers=None):
-    """Construit un FNO ou un TFNO avec la config courante.
+    """Build an FNO or a TFNO from the current config.
 
     kind = "fno"  -> FNO standard (poids spectraux pleins)
            "tfno" -> version factorisee (Tucker), moins de parametres
@@ -743,11 +743,6 @@ print("FNO  :", count_params(fno), "parametres")
 fno = train_with_trainer(fno, name="FNO")
 
 # --- Entrainement du TFNO ---
-# ATTENTION au bug que j'avais laisse ici : j'ecrivais
-#     Tfno = train_with_trainer(fno, name="fFNO")
-# ce qui re-entrainait le FNO et rangeait le resultat dans Tfno. Les deux
-# variables pointaient alors sur le MEME modele, et toute la comparaison
-# FNO / TFNO qui suivait ne comparait rien du tout.
 Tfno = make_fno("tfno")
 print("TFNO :", count_params(Tfno), "parametres")
 Tfno = train_with_trainer(Tfno, name="TFNO")
@@ -768,24 +763,23 @@ show_batch_predictions(fno, test64, title="FNO — test 64×64 (zero-shot)")
 show_batch_predictions(Tfno, test64, title="TFNO — test 64×64 (zero-shot)")
 show_batch_predictions(unet, test64, title="U-Net — test 64×64 (zero-shot)")
 
-r"""**Le resultat central du TP est dans ces quatre figures.**
+r"""**The central result of this lab is in these four figures.**
 
-En 32x32 (la resolution d'entrainement), U-Net et FNO se valent a peu pres.
-En 64x64 **sans reentrainement**, l'ecart est spectaculaire : le FNO produit
-encore un champ correct, l'U-Net s'effondre.
+At 32x32 (the training resolution), U-Net and FNO perform about equally well.
+At 64x64 **without retraining**, the gap is dramatic: the FNO still produces a
+sensible field, while the U-Net collapses.
 
-Pourquoi ? Parce que les deux ne parametrent pas la meme chose.
+Why? Because the two do not parameterise the same thing.
 
-- Une **convolution** apprend des poids attaches a une grille de pixels. Un
-  filtre 3x3 couvre 3/32 de l'image en 32x32, mais seulement 3/64 en 64x64 :
-  le meme filtre ne "voit" plus la meme echelle physique. Le reseau change donc
-  de comportement quand la grille change.
-- Une **couche de Fourier** apprend des poids attaches a des **modes**
-  (frequences), qui sont definis sur le domaine continu et non sur la grille.
-  Le mode k=3 est le mode k=3, que l'on echantillonne le domaine avec 32 ou
-  64 points. C'est ce qui rend le FNO *discretization invariant* : il approxime
-  un operateur entre espaces de fonctions, pas une application entre tableaux
-  de pixels.
+- A **convolution** learns weights tied to a pixel grid. A 3x3 filter covers
+  3/32 of the image at 32x32, but only 3/64 at 64x64: the same filter no longer
+  "sees" the same physical scale. The network therefore changes behaviour when
+  the grid changes.
+- A **Fourier layer** learns weights tied to **modes** (frequencies), which are
+  defined on the continuous domain rather than on the grid. Mode k=3 is mode
+  k=3 whether the domain is sampled with 32 or 64 points. This is what makes
+  the FNO *discretisation invariant*: it approximates an operator between
+  function spaces, not a mapping between pixel arrays.
 
 ## 10. Ablations : protocole + interprétation
 
@@ -812,34 +806,14 @@ Ici, l'objectif n'est pas de "faire du tuning" à l'infini, mais de **comprendre
 
 ### Bonus
 Calculez et comparez $\|\mathbf{v}\|$ avec $\mathbf{v}=-a\nabla u$ pour la vérité et la prédiction $\hat u$.
-
----
-
-**ATTENTION - le bug qui invalidait toutes mes ablations.**
-J'avais ecrit :
-
-```python
-config["opt"]["training_loss"] == "l2"     # <- DEUX signes egal !
-```
-
-`==` est un test d'egalite : cette ligne calcule un booleen, ne l'utilise pas,
-et ne modifie **rien**. Tous mes runs "l2" et "h1" utilisaient donc la meme
-loss (celle fixee au depart), et les differences observees n'etaient que du
-bruit d'initialisation.
-
-Et meme avec un seul `=`, cela n'aurait pas suffi : `train_with_trainer` lit la
-variable **globale** `train_loss`, pas le dictionnaire `config`. C'est
-exactement pour cela que la fonction `set_training_loss()` existe plus haut
-dans le notebook. C'est un bon exemple d'un piege classique : une variable
-"config" qui n'est lue qu'a un seul endroit, au moment de l'initialisation.
 """
 
 resultats = []
 
 
 def ablation(nom, model, loss_name):
-    """Entraine un modele avec une loss donnee et enregistre les metriques."""
-    set_training_loss(loss_name)            # <- met bien a jour la globale train_loss
+    """Train a model with a given loss and record the metrics."""
+    set_training_loss(loss_name)            # updates the global train_loss read by the trainer
     m = train_with_trainer(model, name=nom)
     r32 = evaluate_quick(m, test32)
     r64 = evaluate_quick(m, test64)
@@ -901,75 +875,73 @@ plt.subplot(1, 2, 2)
 sous = df[df.modele.str.contains("FNO hidden")]
 plt.plot([8, 16, 32], sous["l2_32"], 'o-', label="test 32x32")
 plt.plot([8, 16, 32], sous["l2_64"], 's-', label="test 64x64")
-plt.xlabel("hidden_channels"); plt.ylabel("erreur L2 relative")
-plt.title("Effet de la capacite"); plt.legend(); plt.grid(alpha=.3)
+plt.xlabel("hidden_channels"); plt.ylabel("relative L2 error")
+plt.title("Effect of capacity"); plt.legend(); plt.grid(alpha=.3)
 plt.tight_layout(); plt.show()
 
-r"""### Reponses aux questions d'interpretation
+r"""### Answers to the interpretation questions
 
 **1. U-Net et FNO se trompent-ils differemment ?**
 
 Oui, et de facon tres caracteristique.
 
-- Le **FNO** tronque les hautes frequences par construction : au-dela du mode
-  `n_modes`, l'information est purement et simplement supprimee. Ses erreurs
-  sont donc du **lissage** : les fronts raides et les discontinuites de
-  permeabilite sont arrondis. L'erreur est repartie de facon assez uniforme sur
-  le domaine, et ressemble a un residu basse frequence.
-- L'**U-Net**, lui, est local. Il reproduit bien les details fins la ou il a vu
-  des configurations similaires, mais peut se tromper sur le **niveau global**
-  du champ (un biais constant sur une region entiere), parce qu'aucun mecanisme
-  ne lui garantit une coherence a longue distance. Ses erreurs sont plus
-  "par plaques", parfois avec des artefacts en damier aux bords des blocs
-  d'upsampling (`ConvTranspose2d`).
+- The **FNO** truncates high frequencies by construction: beyond mode
+  `n_modes`, the information is simply discarded. Its errors are therefore
+  **smoothing** errors: steep fronts and permeability discontinuities are
+  rounded off. The error is spread fairly uniformly over the domain and looks
+  like a low-frequency residual.
+- The **U-Net** is local. It reproduces fine detail well where it has seen
+  similar configurations, but it can get the **global level** of the field
+  wrong (a constant bias over a whole region), because nothing enforces
+  long-range consistency. Its errors come in patches, sometimes with
+  checkerboard artefacts at the edges of the upsampling blocks
+  (`ConvTranspose2d`).
 
-En changeant de resolution, l'U-Net produit en plus des artefacts francs,
-puisque ses filtres ne correspondent plus a la meme echelle physique.
+When the resolution changes, the U-Net additionally produces outright
+artefacts, since its filters no longer match the same physical scale.
 
-**2. Pourquoi `n_modes` controle-t-il le niveau de detail ?**
+**2. Why does `n_modes` control the level of detail?**
 
-Parce que c'est litteralement une **troncature spectrale**. La couche de Fourier
-calcule la FFT, ne garde que les `n_modes` premiers coefficients, leur applique
-une transformation lineaire apprise, puis fait la FFT inverse. Tout ce qui est
-au-dela de `n_modes` est mis a zero : le modele est **structurellement
-incapable** de produire des variations plus fines que la longueur d'onde
-correspondante.
+Because it is literally a **spectral truncation**. The Fourier layer computes
+the FFT, keeps only the first `n_modes` coefficients, applies a learned linear
+transformation to them, then takes the inverse FFT. Everything beyond
+`n_modes` is set to zero: the model is **structurally incapable** of producing
+variations finer than the corresponding wavelength.
 
-C'est le theoreme d'echantillonnage vu sous un autre angle : garder $m$ modes
-revient a limiter la resolution effective a environ $2m$ points par dimension.
-D'ou le comportement observe : trop peu de modes -> sortie floue ; beaucoup de
-modes -> plus de details, mais un cout en $O(m^2)$ en parametres et un risque
-de surapprentissage sur les hautes frequences, souvent bruitees.
+This is the sampling theorem seen from another angle: keeping $m$ modes
+amounts to limiting the effective resolution to about $2m$ points per
+dimension. Hence the observed behaviour: too few modes -> a blurry output; many
+modes -> more detail, but an $O(m^2)$ parameter cost and a risk of overfitting
+the high frequencies, which are often noisy.
 
-**3. "Zero-shot super-resolution" : est-ce vraiment de la super-resolution ?**
+**3. "Zero-shot super-resolution": is it really super-resolution?**
 
-Non, pas au sens du traitement d'image, et c'est un abus de langage important a
-relever.
+No, not in the image-processing sense, and the misuse of the term is worth
+pointing out.
 
-En imagerie, la super-resolution consiste a **inventer** de l'information
-absente d'une image basse resolution. Ici, ce n'est pas ce qui se passe : on
-recoit une **entree** $a$ deja echantillonnee en 64x64 (donc plus riche), et on
-demande au modele de produire la sortie sur cette meme grille fine. On
-n'invente rien - on evalue un operateur appris sur une discretisation plus fine
-des memes fonctions.
+In imaging, super-resolution means **inventing** information absent from a
+low-resolution image. That is not what happens here: the **input** $a$ arrives
+already sampled at 64x64 (so it is richer), and the model is asked to produce
+the output on that same fine grid. Nothing is invented — a learned operator is
+evaluated on a finer discretisation of the same functions.
 
-La formulation correcte est **invariance a la discretisation** : le FNO
-approxime un operateur $\mathcal{G}: a(\cdot) \mapsto u(\cdot)$ entre espaces de
-fonctions, et la grille n'est qu'un moyen de representer ces fonctions. C'est
-d'ailleurs pour cela que ca marche : l'operateur appris ne depend pas de la
-grille, donc changer de grille est licite.
+The correct term is **discretisation invariance**: the FNO approximates an
+operator $\mathcal{G}: a(\cdot) \mapsto u(\cdot)$ between function spaces, and the
+grid is only a way of representing those functions. That is precisely why it
+works: the learned operator does not depend on the grid, so changing the grid
+is legitimate.
 
-### Bonus : verification "physique" via le flux
+### Bonus: a "physical" check through the flux
 
-Le flux $\mathbf{v} = -a\nabla u$ depend des **gradients** de $u$. C'est donc un
-test bien plus severe qu'une erreur sur $u$ : deux champs peuvent etre proches
-en norme $L^2$ et avoir des gradients tres differents. C'est exactement ce que
-la loss $H^1$ cherche a controler.
+The flux $\mathbf{v} = -a\nabla u$ depends on the **gradients** of $u$. It is
+therefore a far stricter test than an error on $u$: two fields can be close in
+$L^2$ norm and yet have very different gradients. This is exactly what the
+$H^1$ loss is meant to control.
 """
 
 @torch.no_grad()
 def comparer_flux(model, loader, idx=1):
-    """Compare le flux v = -a grad(u) entre verite et prediction."""
+    """Compare the flux v = -a grad(u) between ground truth and prediction."""
     model.eval()
     batch = next(iter(loader))
     if isinstance(batch, (list, tuple)):
@@ -997,11 +969,11 @@ def comparer_flux(model, loader, idx=1):
     err_v = (v_pred - v_vrai).norm() / v_vrai.norm()
 
     fig, axs = plt.subplots(1, 4, figsize=(15, 3.2))
-    for ax, (img, t) in zip(axs, [(u, "u vrai"), (uh, "u predit"),
-                                  (v_vrai, "|v| vrai"), (v_pred, "|v| predit")]):
+    for ax, (img, t) in zip(axs, [(u, "u true"), (uh, "u predicted"),
+                                  (v_vrai, "|v| true"), (v_pred, "|v| predicted")]):
         im = ax.imshow(img, origin="lower"); ax.set_title(t)
         plt.colorbar(im, ax=ax, fraction=.046)
-    plt.suptitle(f"erreur relative sur u : {err_u:.4f}   |   sur le flux |v| : {err_v:.4f}")
+    plt.suptitle(f"relative error on u: {err_u:.4f}   |   on the flux |v|: {err_v:.4f}")
     plt.tight_layout(); plt.show()
     return err_u.item(), err_v.item()
 
@@ -1016,20 +988,19 @@ set_training_loss("h1")
 fno_h1 = train_with_trainer(make_fno("fno"), name="FNO h1")
 eu_h1, ev_h1 = comparer_flux(fno_h1, test32)
 
-print(f"\n{'entrainement':16s} {'erreur sur u':>14s} {'erreur sur le flux':>20s}")
-print(f"{'loss L2':16s} {eu_l2:14.4f} {ev_l2:20.4f}")
-print(f"{'loss H1':16s} {eu_h1:14.4f} {ev_h1:20.4f}")
+print(f"\n{'training':16s} {'error on u':>14s} {'error on the flux':>20s}")
+print(f"{'L2 loss':16s} {eu_l2:14.4f} {ev_l2:20.4f}")
+print(f"{'H1 loss':16s} {eu_h1:14.4f} {ev_h1:20.4f}")
 
-r"""**C'est la justification de la loss $H^1$.** Entrainer en $L^2$ donne une
-erreur legerement plus faible... **sur $u$**, ce qui est logique puisque c'est
-exactement ce qu'on a optimise. Mais sur le **flux** - la quantite qui a un sens
-physique, celle qu'un ingenieur va reellement utiliser - le modele entraine en
-$H^1$ est meilleur.
+r"""**This is the justification for the $H^1$ loss.** Training in $L^2$ gives a
+slightly lower error... **on $u$**, which is unsurprising since that is exactly
+what was optimised. But on the **flux** — the physically meaningful quantity,
+the one an engineer will actually use — the model trained in $H^1$ is better.
 
-Lecon generale : **la loss encode ce qui compte pour vous.** Optimiser une
-metrique commode n'est pas la meme chose qu'optimiser la bonne. C'est le meme
-raisonnement qui menait, au TP RNN, a preferer un entrainement multi-pas quand
-l'objectif reel est la prevision long terme.
+General lesson: **the loss encodes what you actually care about.** Optimising
+a convenient metric is not the same as optimising the right one. This is the
+same reasoning that, in the RNN lab, favoured multi-step training when the real
+objective is long-horizon forecasting.
 
 ## Bonus: Aller plus loin en mixant dépendance spatiale et temporelle
 
@@ -1061,17 +1032,17 @@ from neuralop.data.datasets import NavierStokesDataset
 
 Nous utilisons un dataset de vorticité. Le modèle prend la frame à l'instant $t$ et prédit l'instant $t+1$. En mode test, on réinjecte la prédiction pour prédire $t+2$, et ainsi de suite.
 
-C'est **exactement** le probleme du TP meteo, transpose en 2D spatial. Le
-modele est entraine en "teacher forcing" (une seule etape, avec la vraie
-frame en entree) mais utilise en boucle fermee. Les memes remedes s'appliquent :
-entrainement multi-pas, ou scheduled sampling.
+This is **exactly** the problem from the weather lab, transposed to 2D space.
+The model is trained with teacher forcing (a single step, with the true frame
+as input) but used in closed loop. The same remedies apply: multi-step
+training, or scheduled sampling.
 """
 
 def charger_navier_stokes(n_train=200, n_test=20, resolution=64, T=20):
-    """Charge un jeu Navier-Stokes et le met en forme (N, T, H, W).
+    """Load a Navier-Stokes dataset and reshape it to (N, T, H, W).
 
-    L'API de NeuralOperator change souvent entre versions ; on encapsule le
-    chargement pour n'avoir a corriger qu'a un seul endroit.
+    The NeuralOperator API changes often between versions; the loading is
+    wrapped here so that only one place needs fixing.
     """
     ds = NavierStokesDataset(
         root_dir="./data", n_train=n_train, n_tests=[n_test],
@@ -1084,12 +1055,12 @@ def charger_navier_stokes(n_train=200, n_test=20, resolution=64, T=20):
 def entrainer_pas_de_temps(model, sequences, n_epochs=20, lr=1e-3, bsz=8):
     """Entraine un FNO a predire u_{t+1} a partir de u_t.
 
-    sequences : tenseur (N, T, H, W) de trajectoires.
-    On fabrique des paires (u_t, u_{t+1}) en aplatissant les dimensions N et T.
+    sequences: tensor (N, T, H, W) of trajectories.
+    Pairs (u_t, u_{t+1}) are built by flattening the N and T dimensions.
     """
     N, T, H, W = sequences.shape
-    X = sequences[:, :-1].reshape(-1, 1, H, W)     # toutes les frames sauf la derniere
-    Y = sequences[:, 1:].reshape(-1, 1, H, W)      # decalees d'un pas
+    X = sequences[:, :-1].reshape(-1, 1, H, W)     # every frame except the last
+    Y = sequences[:, 1:].reshape(-1, 1, H, W)      # shifted by one step
     X, Y = X.to(device), Y.to(device)
 
     model = model.to(device)
@@ -1112,20 +1083,20 @@ def entrainer_pas_de_temps(model, sequences, n_epochs=20, lr=1e-3, bsz=8):
 
 @torch.no_grad()
 def rollout(model, u0, n_steps):
-    """Rollout autoregressif : on part de u0 et on itere le modele sur lui-meme."""
+    """Autoregressive rollout: start from u0 and iterate the model on itself."""
     model.eval()
     u = u0.to(device)
     trajectoire = []
     for _ in range(n_steps):
-        u = model(u)                # la sortie devient l'entree suivante
+        u = model(u)                # the output becomes the next input
         trajectoire.append(u.cpu())
     return torch.cat(trajectoire, dim=0)
 
 
 """### Execution du bonus
 
-Le telechargement du dataset Navier-Stokes est lourd (~1 Go) et l'entrainement
-demande un GPU. On protege donc l'execution.
+Downloading the Navier-Stokes dataset is heavy (~1 GB) and training requires a
+GPU, so the execution is guarded.
 """
 
 FAIRE_LE_BONUS = torch.cuda.is_available()
@@ -1133,14 +1104,14 @@ FAIRE_LE_BONUS = torch.cuda.is_available()
 if FAIRE_LE_BONUS:
     try:
         ns = charger_navier_stokes()
-        # Mise en forme : on recupere un tenseur (N, T, H, W) de trajectoires.
-        # Le nom exact des attributs depend de la version de neuraloperator ;
-        # on inspecte le premier batch pour s'adapter.
+        # Reshaping: recover an (N, T, H, W) tensor of trajectories.
+        # The exact attribute names depend on the neuraloperator version,
+        # so the first batch is inspected to adapt.
         batch = next(iter(ns.train_db)) if hasattr(ns, "train_db") else None
-        print("structure du dataset :", type(batch), getattr(batch, "keys", lambda: None)())
+        print("dataset structure:", type(batch), getattr(batch, "keys", lambda: None)())
 
-        # A adapter selon la sortie ci-dessus : on suppose ici des trajectoires
-        # stockees dans un tenseur de shape (N, T, H, W).
+        # Adapt to the output above: trajectories are assumed to be stored
+        # in a tensor of shape (N, T, H, W).
         sequences = ns.train_db.data if hasattr(ns.train_db, "data") else None
 
         if sequences is not None and sequences.ndim == 4:
@@ -1148,7 +1119,7 @@ if FAIRE_LE_BONUS:
                              in_channels=1, out_channels=1, n_layers=4)
             model_ns = entrainer_pas_de_temps(model_ns, sequences[:180], n_epochs=20)
 
-            # Rollout sur une trajectoire de test
+            # Rollout on one test trajectory
             traj_vraie = sequences[-1]                       # (T, H, W)
             u0 = traj_vraie[0:1].unsqueeze(1)                # (1, 1, H, W)
             n_steps = traj_vraie.shape[0] - 1
@@ -1164,53 +1135,53 @@ if FAIRE_LE_BONUS:
             plt.title("Accumulation de l'erreur en rollout autoregressif")
             plt.grid(alpha=.3); plt.show()
 
-            # Visualisation de la derive
+            # Visualising the drift
             pas = [0, n_steps // 3, 2 * n_steps // 3, n_steps - 1]
             fig, axs = plt.subplots(2, len(pas), figsize=(3.5 * len(pas), 7))
             for j, t in enumerate(pas):
                 axs[0, j].imshow(traj_vraie[t + 1], origin="lower")
-                axs[0, j].set_title(f"verite, t = {t+1}")
+                axs[0, j].set_title(f"truth, t = {t+1}")
                 axs[1, j].imshow(traj_pred[t], origin="lower")
-                axs[1, j].set_title(f"predit, t = {t+1} (err {erreurs[t]:.3f})")
+                axs[1, j].set_title(f"predicted, t = {t+1} (err {erreurs[t]:.3f})")
                 for a in (axs[0, j], axs[1, j]): a.axis('off')
-            plt.suptitle("Derive progressive du rollout")
+            plt.suptitle("Progressive drift of the rollout")
             plt.tight_layout(); plt.show()
         else:
-            print("Format de dataset inattendu : adapter l'extraction des trajectoires.")
+            print("Unexpected dataset format: adapt the trajectory extraction.")
     except Exception as e:
         print("Bonus non execute :", repr(e))
 else:
-    print("Bonus Navier-Stokes ignore (pas de GPU).")
-    print("Comportement attendu : l'erreur croit d'abord lentement puis")
-    print("explose - la meme accumulation d'erreurs qu'au TP RNN meteo.")
+    print("Navier-Stokes bonus skipped (no GPU).")
+    print("Expected behaviour: the error first grows slowly, then")
+    print("explodes - the same error accumulation as in the RNN weather lab.")
 
 r"""## Conclusion du TP
 
 | | U-Net (CNN) | FNO |
 |---|---|---|
-| Objet appris | application grille -> grille | operateur fonction -> fonction |
-| Localite | filtres locaux (3x3) | global par nature (la FFT melange tout le domaine) |
-| Changement de resolution | il faut reentrainer | fonctionne tel quel |
-| Cout d'une couche | $O(N)$ en pixels | $O(N \log N)$ (FFT) |
-| Limite | champ receptif fini | troncature des hautes frequences |
+| What is learned | grid -> grid mapping | function -> function operator |
+| Locality | local filters (3x3) | global by nature (the FFT mixes the whole domain) |
+| Change of resolution | retraining required | works as is |
+| Cost of one layer | $O(N)$ in pixels | $O(N \log N)$ (FFT) |
+| Limitation | finite receptive field | truncation of high frequencies |
 
-### Le fil rouge de tout le cours
+### The common thread across the whole course
 
-Ce TP boucle la boucle sur quelque chose qui traverse les six precedents : **le
-bon modele est celui dont la structure encode les bonnes invariances du
-probleme.**
+This lab closes the loop on something running through the previous six: **the
+right model is the one whose structure encodes the right invariances of the
+problem.**
 
-| Structure du probleme | Architecture adaptee | Invariance encodee |
+| Problem structure | Suitable architecture | Invariance encoded |
 |---|---|---|
-| Aucune (vecteurs quelconques) | MLP | aucune |
-| Voisinage local, motifs repetes | CNN | translation |
-| Sequence, ordre temporel | RNN / GRU / LSTM | translation dans le temps |
-| Relations a longue portee, ordre souple | Transformer | permutation (+ positions ajoutees) |
-| Fonction sur un domaine continu | FNO | **discretisation** |
+| None (arbitrary vectors) | MLP | none |
+| Local neighbourhoods, repeated patterns | CNN | translation |
+| Sequence, temporal order | RNN / GRU / LSTM | translation in time |
+| Long-range relations, loose order | Transformer | permutation (+ positions added back) |
+| Function on a continuous domain | FNO | **discretisation** |
 
-Un MLP suffisamment gros pourrait en theorie tout apprendre (theoreme
-d'approximation universelle). En pratique il faudrait des quantites de donnees
-astronomiques, parce qu'il devrait *deduire* de ces donnees des structures que
-les autres architectures lui donnent **gratuitement**. Choisir une architecture,
-c'est choisir ce qu'on n'aura pas besoin d'apprendre.
+A large enough MLP could in theory learn anything (universal approximation
+theorem). In practice it would need astronomical amounts of data, because it
+would have to *infer* from that data the structures the other architectures
+hand it **for free**. Choosing an architecture is choosing what you will not
+have to learn.
 """

@@ -459,10 +459,6 @@ class GRUPredictor(nn.Module):
         Shape imposee par PyTorch : (num_layers, batch, hidden_dim).
         Attention, ce n'est PAS batch_first, meme quand batch_first=True :
         l'option ne concerne que le tenseur d'entree, pas l'etat cache.
-
-        Correction par rapport a ma version initiale : c'etait `input.dtype`
-        (la fonction native `input` de Python !) au lieu de `inputs.dtype`.
-        L'erreur passait inapercue parce que forward() recreait h0 juste apres.
         """
         return th.zeros(self.nstack, bsz, self.hdim,
                         device=inputs.device, dtype=inputs.dtype)

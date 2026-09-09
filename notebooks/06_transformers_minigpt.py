@@ -154,14 +154,13 @@ def decode(ids):
 data = torch.tensor(encode(text), dtype=torch.long)
 print("vocab_size:", vocab_size, "| data shape:", data.shape)
 
-# NB : la cellule suivante REMPLACE la tokenisation char-level definie
-# au-dessus par un Byte-Level BPE. On garde les deux dans le notebook pour
-# pouvoir comparer :
-#   - char-level : vocabulaire minuscule (~65), sequences tres longues, le
-#     modele doit apprendre l'orthographe des mots ;
-#   - BPE        : vocabulaire de 5000 sous-mots, sequences ~4x plus courtes
-#     a texte egal, donc un block_size de 256 couvre bien plus de contexte.
-# En contrepartie la table d'embedding passe de 65 a 5000 lignes.
+# NB: the next cell REPLACES the char-level tokenisation defined above with a
+# Byte-Level BPE. Both are kept in the notebook so they can be compared:
+#   - char-level: tiny vocabulary (~65), very long sequences, the model has to
+#     learn the spelling of words;
+#   - BPE       : 5000-subword vocabulary, sequences ~4x shorter for the same
+#     text, so a block_size of 256 covers far more context.
+# The trade-off is that the embedding table grows from 65 to 5000 rows.
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
@@ -376,10 +375,10 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = n_heads
         self.head_dim = n_embd // n_heads
 
-        # Une SEULE projection qui produit q, k et v d'un coup : c'est
-        # mathematiquement equivalent a trois nn.Linear separes (on concatene
-        # juste leurs matrices), mais c'est un seul produit matriciel au lieu
-        # de trois -> nettement plus rapide sur GPU.
+        # A SINGLE projection producing q, k and v at once: this is
+        # mathematically equivalent to three separate nn.Linear layers (their
+        # matrices are simply concatenated), but it is one matrix product
+        # instead of three -> markedly faster on GPU.
         self.qkv = nn.Linear(n_embd, 3 * n_embd)
         self.proj = nn.Linear(n_embd, n_embd)
         self.attn_drop = nn.Dropout(dropout)
@@ -792,20 +791,20 @@ print(decode(out[0].tolist()))
 
 Faites 2–3 modifications dans `config` et relancez l'entraînement (plus court si CPU).
 
-On automatise : une fonction qui entraine un modele a partir d'une config et
-renvoie la loss de validation finale. On ne change **qu'un parametre a la
-fois** par rapport a la config de reference.
+Automating this: a function that trains a model from a config and returns the
+final validation loss. **Only one parameter at a time** is changed relative to
+the reference config.
 """
 
 def entrainer(cfg, max_iters=200, seed=0, verbose=False):
-    """Entraine un MiniGPT et renvoie (loss finale, temps, nb de parametres)."""
+    """Train a MiniGPT and return (final loss, time, number of parameters)."""
     torch.manual_seed(seed)
     m = MiniGPT(vocab_size, cfg).to(device)
     opt = torch.optim.AdamW(m.parameters(), lr=cfg["lr"])
     t0 = time.time()
     m.train()
     for it in range(max_iters):
-        # get_batch lit la variable globale config : on la synchronise
+        # get_batch reads the global config variable, so keep it in sync
         globals()["config"] = cfg
         xb, yb = get_batch("train")
         _, loss = m(xb, yb)
@@ -849,52 +848,51 @@ for nom, modif in ablations.items():
     print(f"{nom:24s} | {r['params']:>9,d} params | val loss {r['val_loss']:.4f}"
           f" | perplexite {r['perplexite']:6.1f} | {r['temps']:5.1f} s")
 
-globals()["config"] = base   # on remet la config de reference
+globals()["config"] = base   # restore the reference config
 
 plt.figure(figsize=(10, 4))
 noms = list(resultats.keys())
 plt.barh(noms, [resultats[n]['val_loss'] for n in noms])
-plt.xlabel("loss de validation (plus bas = mieux)")
-plt.title("Ablations du mini-GPT (200 iterations chacune)")
+plt.xlabel("validation loss (lower is better)")
+plt.title("Mini-GPT ablations (200 iterations each)")
 plt.grid(alpha=.3, axis='x'); plt.tight_layout(); plt.show()
 
-r"""### Interpretation des ablations
+r"""### Interpreting the ablations
 
-**Profondeur (`n_layers`).** C'est le levier le plus efficace a budget de calcul
-donne. Chaque bloc supplementaire permet une "passe de raisonnement" de plus :
-le bloc 1 peut identifier le token precedent, le bloc 2 combiner cette
-information avec autre chose, etc. Attention toutefois, a 200 iterations
-seulement, un modele a 8 blocs n'a pas fini de converger : il faut comparer a
-budget d'entrainement egal, pas seulement a nombre d'iterations egal.
+**Depth (`n_layers`).** This is the most effective lever at a given compute
+budget. Each extra block allows one more "reasoning pass": block 1 can identify
+the previous token, block 2 can combine that with something else, and so on.
+Note however that at only 200 iterations an 8-block model has not finished
+converging: models should be compared at equal training budget, not merely at
+equal iteration count.
 
-**Nombre de tetes (`n_heads`).** A `n_embd` fixe, augmenter le nombre de tetes
-ne change **pas** le nombre de parametres : on decoupe simplement les 128
-dimensions en 4 blocs de 32 au lieu de 1 bloc de 128. Chaque tete peut alors se
-specialiser sur un type de relation different (le token precedent, le sujet du
-verbe, la parenthese ouvrante correspondante...). Une seule tete degrade les
-resultats ; passer de 4 a 8 n'apporte plus grand-chose ici car head_dim tombe a
-16, ce qui devient trop petit pour representer une relation utile.
+**Number of heads (`n_heads`).** At fixed `n_embd`, increasing the number of
+heads does **not** change the parameter count: the 128 dimensions are simply
+split into 4 blocks of 32 instead of 1 block of 128. Each head can then
+specialise on a different kind of relation (the previous token, the subject of
+the verb, the matching opening bracket...). A single head degrades the results;
+going from 4 to 8 brings little here, because head_dim drops to 16, which
+becomes too small to represent a useful relation.
 
-**Contexte (`block_size`).** Plus de contexte = plus d'information disponible,
-mais le cout de l'attention croit en **O(T^2)** : doubler le contexte quadruple
-le cout de la matrice d'attention. C'est LA limite structurelle du Transformer,
-et la raison d'etre de toutes les variantes "attention efficace" (Longformer,
-FlashAttention, Mamba...). Sur du texte char-level, un contexte de 32
-caracteres est clairement insuffisant : le modele ne voit meme pas une phrase.
+**Context (`block_size`).** More context means more available information, but
+the cost of attention grows as **O(T^2)**: doubling the context quadruples the
+cost of the attention matrix. This is THE structural limit of the Transformer,
+and the reason every "efficient attention" variant exists (Longformer,
+FlashAttention, Mamba...). On char-level text a 32-character context is clearly
+insufficient: the model does not even see a full sentence.
 
-**Dropout.** Sur 200 iterations le modele n'a pas le temps de surapprendre, donc
-`dropout=0` est souvent le meilleur ici. Sur un entrainement long l'inverse
-serait vrai. C'est un rappel utile : la valeur optimale d'un hyperparametre de
-regularisation depend de la duree d'entrainement.
+**Dropout.** Over 200 iterations the model has no time to overfit, so
+`dropout=0` is often best here. Over a long training run the opposite would
+hold. A useful reminder: the optimal value of a regularisation hyperparameter
+depends on the training duration.
 
-**Largeur (`n_embd`).** Reduire a 64 divise a peu pres par 4 le nombre de
-parametres des blocs et degrade nettement. Largeur et profondeur sont les deux
-axes du "scaling", et les lois d'echelle montrent qu'il faut les augmenter
-ensemble.
+**Width (`n_embd`).** Reducing it to 64 roughly quarters the block parameter
+count and degrades results markedly. Width and depth are the two axes of
+scaling, and the scaling laws show they must be increased together.
 
-### Effet de la temperature en generation
+### Effect of temperature at generation time
 
-La temperature $T$ divise les logits avant le softmax :
+The temperature $T$ divides the logits before the softmax:
 $p_i = \mathrm{softmax}(z_i / T)$.
 """
 
@@ -907,14 +905,14 @@ for temp in (0.2, 0.5, 0.8, 1.0, 1.5):
     print(f"\n=== temperature = {temp} ===")
     print(decode(out[0].tolist()))
 
-r"""- **$T \to 0$** : la distribution se concentre sur le token le plus probable
-  (equivalent au greedy). Texte tres correct localement, mais repetitif - il
-  tombe vite dans des boucles.
-- **$T = 1$** : on echantillonne selon la distribution apprise telle quelle.
-- **$T > 1$** : la distribution s'aplatit, on prend plus de risques. Plus
-  creatif, mais on finit par produire du charabia.
+r"""- **$T \to 0$**: the distribution concentrates on the most likely token
+  (equivalent to greedy decoding). Locally very clean text, but repetitive — it
+  quickly falls into loops.
+- **$T = 1$**: sampling follows the learned distribution as it is.
+- **$T > 1$**: the distribution flattens and more risk is taken. More creative,
+  but it ends up producing gibberish.
 
-C'est exactement le parametre `temperature` des API de LLM.
+This is exactly the `temperature` parameter of LLM APIs.
 
 # Partie B — Fine-tuning d’un GPT-2 pré-entraîné (GPU recommandé)
 
@@ -1079,60 +1077,59 @@ else:
 
 ### 1. Comparaison avant / apres
 
-**Avant**, GPT-2 produit de l'anglais moderne parfaitement grammatical mais sans
-aucun rapport avec Shakespeare : il continue le prompt comme un article de blog
-ou un extrait de Wikipedia.
+**Before**, GPT-2 produces perfectly grammatical modern English with no
+connection to Shakespeare: it continues the prompt like a blog post or a
+Wikipedia excerpt.
 
-**Apres** quelques centaines de pas, la *forme* change nettement : noms de
-personnages en majuscules suivis de deux-points, repliques courtes, vocabulaire
-archaisant (*thou*, *thee*, *hath*). Le contenu, lui, reste souvent incoherent -
-200 pas sur un corpus de 1 Mo ne suffisent pas a apprendre une intrigue.
+**After** a few hundred steps the *form* changes markedly: character names in
+capitals followed by colons, short lines, archaic vocabulary (*thou*, *thee*,
+*hath*). The content, however, often remains incoherent — 200 steps on a 1 MB
+corpus are not enough to learn a plot.
 
-C'est le comportement typique du fine-tuning court : il deplace le **style** et
-le **format** bien avant le fond. C'est aussi pour ca qu'il est si efficace en
-pratique (adapter un modele a un format de reponse), et pourquoi il ne suffit
-pas a lui apprendre des connaissances nouvelles.
+This is the typical behaviour of short fine-tuning: it shifts **style** and
+**format** long before substance. It is also why fine-tuning is so effective in
+practice (adapting a model to a response format), and why it is not enough to
+teach it new knowledge.
 
-### 2. Pourquoi le fine-tuning converge-t-il plus vite ?
+### 2. Why does fine-tuning converge faster?
 
-Parce qu'il ne repart pas de zero. Notre mini-GPT doit tout apprendre a partir
-de poids aleatoires : que les caracteres forment des mots, que les mots ont une
-syntaxe, qu'un dialogue a une structure. GPT-2 a deja appris tout cela sur
-~40 Go de texte (WebText, ~1.5 milliard de parametres d'entrainement cumule).
+Because it does not start from scratch. Our mini-GPT has to learn everything
+from random weights: that characters form words, that words follow a syntax,
+that dialogue has a structure. GPT-2 has already learned all of this on ~40 GB
+of text (WebText).
 
 Concretement :
 
-- **le point de depart est bien meilleur** : la loss initiale de GPT-2 sur
-  Shakespeare est deja plus basse que la loss *finale* de notre mini-GPT ;
-- **les representations sont reutilisables** : les couches basses encodent la
-  syntaxe generale de l'anglais, qui ne change pas entre Wikipedia et
-  Shakespeare. Seules les couches hautes ont vraiment besoin d'etre ajustees ;
-- **le gradient est mieux conditionne** : on part d'une region de l'espace des
-  parametres deja "bonne", d'ou un learning rate 10 a 100 fois plus petit
-  (5e-5 contre 3e-4) et une convergence en centaines de pas plutot qu'en
-  dizaines de milliers.
+- **the starting point is far better**: GPT-2's initial loss on Shakespeare is
+  already lower than the *final* loss of our mini-GPT;
+- **the representations are reusable**: the lower layers encode the general
+  syntax of English, which does not change between Wikipedia and Shakespeare.
+  Only the upper layers genuinely need adjusting;
+- **the gradient is better conditioned**: training starts from an already
+  "good" region of parameter space, hence a learning rate 10 to 100 times
+  smaller (5e-5 against 3e-4) and convergence in hundreds of steps rather than
+  tens of thousands.
 
-C'est le principe du **transfert d'apprentissage**, et c'est ce qui rend le deep
-learning utilisable quand on n'a que quelques milliers d'exemples. On l'a deja
-rencontre dans ce cours sous une autre forme : ImageNet pre-entraine pour la
-vision.
+This is the principle of **transfer learning**, and it is what makes deep
+learning usable when only a few thousand examples are available. It already
+appeared in this course in another form: ImageNet pre-training for vision.
 
 ### 3. Augmenter `max_steps`
 
-En passant de 200 a 2000 pas, la loss de validation continue de descendre puis
-**remonte** : le corpus (1 Mo) est minuscule devant les 124 M de parametres de
-GPT-2, qui se met a memoriser. Les parades usuelles : early stopping sur la
-validation, learning rate plus faible, ou n'entrainer qu'une petite partie des
-poids (LoRA, adapters) plutot que le modele entier.
+Going from 200 to 2000 steps, the validation loss keeps falling and then
+**rises again**: the corpus (1 MB) is tiny against GPT-2's 124 M parameters,
+which start to memorise it. The usual remedies: early stopping on validation, a
+lower learning rate, or training only a small subset of the weights (LoRA,
+adapters) rather than the whole model.
 
 ### Recapitulatif : from scratch vs fine-tuning
 
 | | Mini-GPT from scratch | Fine-tuning GPT-2 |
 |---|---|---|
-| Parametres | ~1 M | 124 M |
-| Donnees necessaires | tout doit venir du corpus | corpus vu comme un simple ajustement |
+| Parameters | ~1 M | 124 M |
+| Data required | everything must come from the corpus | corpus seen as a mere adjustment |
 | Learning rate | 3e-4 | 5e-5 |
-| Duree | des milliers de pas | des centaines |
-| Qualite atteinte | mots plausibles | anglais correct + style cible |
-| Interet | comprendre le mecanisme | ce qu'on fait en pratique |
+| Duration | thousands of steps | hundreds |
+| Quality reached | plausible words | correct English + target style |
+| Purpose | understanding the mechanism | what is actually done in practice |
 """
