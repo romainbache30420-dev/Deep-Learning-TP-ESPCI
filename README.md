@@ -5,9 +5,6 @@ allant de la régression linéaire à la main jusqu'aux *neural operators* pour 
 résolution d'EDP. Les notebooks ont été complétés, corrigés et commentés après
 les séances : chaque section porte les résultats obtenus et leur interprétation.
 
-Un **document de synthèse** reprend l'ensemble des notions sous forme de cours :
-[`cours/Cours_Deep_Learning_ESPCI.pdf`](cours/Cours_Deep_Learning_ESPCI.pdf).
-
 ---
 
 ## Les TP
@@ -42,7 +39,6 @@ l'architecture encode les bonnes invariances du problème.**
 ```
 notebooks/          les TP, au format .py (source de référence, lisible dans git)
 notebooks/ipynb/    les mêmes TP au format .ipynb, générés — ouvrables dans Colab
-cours/              le document de synthèse et ses sources
 tools/              utilitaires (conversion .py -> .ipynb, nettoyage)
 ```
 

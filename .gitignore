@@ -23,8 +23,8 @@ venv/
 env/
 *.egg-info/
 
-# Fichiers intermédiaires de génération du cours
-cours/build/
+# Cours de synthèse : document personnel, non publié
+cours/
 
 # Systèmes
 .DS_Store
