@@ -79,30 +79,6 @@ Data is not versioned (see `.gitignore`): the notebooks fetch it on first run.
 
 ---
 
-## History
-
-The first commit holds the **raw** Colab exports, exactly as produced during the
-sessions. Later commits add the corrections and the missing sections, so the two
-states can be compared directly:
-
-```bash
-git diff 97cc70e -- notebooks/
-```
-
-A few bugs found along the way, instructive in their own right:
-
-- **Lab 04** — the encoder returned its features *after* max-pooling. The skip
-  connections therefore could not do their job, which is precisely to feed
-  full-resolution detail back into the decoder.
-- **Lab 05** — `init_hidden` used `input.dtype`, Python's built-in function,
-  instead of `inputs.dtype`. The error went unnoticed because `forward()`
-  recreated the hidden state immediately afterwards.
-- **Lab 07** — `config["opt"]["training_loss"] == "l2"`: a `==` where a `=` was
-  meant. The line changed nothing, so **every L2 / H1 ablation was in fact
-  comparing models trained with the same loss.** A `=` alone would not have
-  fixed it either, since the training function reads a global variable rather
-  than the configuration dictionary.
-
 ## License
 
 Code released under the MIT license (see [LICENSE](LICENSE)). The problem
