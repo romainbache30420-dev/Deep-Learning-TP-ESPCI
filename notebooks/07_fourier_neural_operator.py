@@ -29,7 +29,8 @@ if sys.version_info < (3, 9):
 
 if pkgutil.find_loader("neuralop") is None:
     print("Installation de neuraloperator (PyPI)...")
-    !pip -q install -U neuraloperator
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "neuraloperator"], check=True)
     importlib.invalidate_caches()
 
 import neuralop

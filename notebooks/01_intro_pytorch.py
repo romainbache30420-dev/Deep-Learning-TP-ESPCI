@@ -49,8 +49,8 @@ import torch.nn as nn
 # Need help ?
 help(th.arange)
 
-# or
-?th.arange
+# or, dans un notebook uniquement (syntaxe IPython) :
+# ?th.arange
 
 """# Tensors
 
@@ -346,13 +346,32 @@ Use the `backward` function to get the gradient of the loss with respect to the 
 
 ## Your code here
 loss.backward()
-w=w-0.01*w.grad
-w0=w0-00.1*w0.grad
-Y1_new=w*X+w0
-loss_new=((Y1_new-Y).pow(2)).mean()
-print(loss_new-loss)
+print("dL/dw  =", w.grad.item())
+print("dL/dw0 =", w0.grad.item())
+
+# Mise a jour : un pas de descente de gradient, w <- w - lr * dL/dw.
+# On l'ecrit dans un bloc no_grad() et avec des operations "in place" (-=) :
+#  - no_grad() evite d'enregistrer la mise a jour dans le graphe de calcul
+#    (la mise a jour n'est pas une operation qu'on veut deriver) ;
+#  - sans cela, "w = w - lr*w.grad" cree un NOUVEAU tenseur, qui n'est plus
+#    une feuille du graphe : au backward suivant, w.grad resterait a None.
+lr = 0.01
+with th.no_grad():
+    w  -= lr * w.grad
+    w0 -= lr * w0.grad
+
+Y1_new = w * X + w0
+loss_new = ((Y1_new - Y).pow(2)).mean()
+print("variation de la loss :", (loss_new - loss).item())
 
 #le résultat est négatif on a donc bien diminuer la loss
+
+# Remarque importante : les gradients de PyTorch s'ACCUMULENT.
+# Si on refaisait un backward() maintenant sans remettre w.grad a zero,
+# le nouveau gradient s'ajouterait a l'ancien. D'ou le zero_grad() du
+# paragraphe suivant, qu'on appelle a chaque iteration d'entrainement.
+w.grad.zero_()
+w0.grad.zero_()
 
 """## 5) Optimizer and the loss function
 
@@ -467,6 +486,31 @@ print((((loss_new-loss)/loss)*100).item())
 
 - Read the documentation of these losses and apply the `MSELoss` to the prediction for `X`
 - Repeat all the steps from the previous TODO list and include a calculation of the `MSELoss`.
+"""
+
+## Your code here : les memes etapes, mais avec nn.MSELoss() au lieu du calcul a la main
+w = th.randn(1, requires_grad=True)
+w0 = th.randn(1, requires_grad=True)
+sgd = th.optim.SGD((w, w0), lr=0.01)
+mse = nn.MSELoss()          # <- le module de loss remplace ((Y_pred-Y)**2).mean()
+
+Y_pred = w * X + w0
+loss = mse(Y_pred, Y)       # exactement la meme valeur que le calcul manuel
+print("MSELoss :", loss.item())
+print("verification a la main :", ((Y_pred - Y).pow(2)).mean().item())
+
+loss.backward()
+print("avant step  : w =", w.item(), "| grad =", w.grad.item())
+sgd.step()
+print("apres step  : w =", w.item(), "| grad =", w.grad.item())  # w a bouge, le grad est intact
+sgd.zero_grad()
+print("apres zero_ : w =", w.item(), "| grad =", w.grad.item())  # le grad est remis a 0
+
+"""Les trois lignes `loss.backward()` / `optimizer.step()` / `optimizer.zero_grad()`
+forment le **triptyque** que l'on retrouvera dans absolument tous les TP suivants.
+L'ordre compte : on ne peut pas mettre a jour avant d'avoir calcule le gradient,
+et il faut remettre les gradients a zero avant l'iteration suivante (sinon ils
+s'accumulent).
 
 ## 6) The training function
 
@@ -488,34 +532,80 @@ Now you have everything to write the training code of the model!
 
 Nepoch = 10
 lr = 0.01
+
 ## Your code here
-# def training(what do you need here):
-w = th.randn(1,requires_grad=True)
-w0= th.randn(1,requires_grad=True)
-trainable_parameters = (w,w0)
-sgd = th.optim.SGD(trainable_parameters, lr=lr)
-#training
-Loss=[]
-for i in range(Nepoch):
-  Y_pred=w*X+w0
-  loss=((Y_pred-Y).pow(2)).mean()
-  Loss.append(loss.item())
-  loss.backward()
-  sgd.step()
-  sgd.zero_grad()
+def training(X, Y, Nepoch=100, lr=0.01, verbose=False):
+    """Regression lineaire par descente de gradient, ecrite "a la main".
 
-plt.plot(th.linspace(0,Nepoch,Nepoch).detach(),Loss)
-plt.figure()
-xs = th.linspace(0,8,2) # need 2 points for a line
-plt.plot(xs,(w*xs+w0).detach(),'r', label = 'Uptaded line')
-plt.scatter(X,Y, label = 'data')
-plt.xlabel('x')
-plt.ylabel('y')
-plt.legend()
+    Args:
+        X, Y   : tenseurs 1D de meme longueur (les donnees)
+        Nepoch : nombre de passages sur les donnees
+        lr     : learning rate
+    Returns:
+        (w, w0, Loss) : les parametres appris et l'historique de la loss
+    """
+    w = th.randn(1, requires_grad=True)
+    w0 = th.randn(1, requires_grad=True)
+    sgd = th.optim.SGD((w, w0), lr=lr)
+
+    Loss = []
+    for epoch in range(Nepoch):
+        Y_pred = w * X + w0                    # 1. forward
+        loss = ((Y_pred - Y).pow(2)).mean()    # 2. loss
+        Loss.append(loss.item())
+
+        loss.backward()                        # 3. backward : calcul des gradients
+        sgd.step()                             # 4. mise a jour des parametres
+        sgd.zero_grad()                        # 5. remise a zero des gradients
+
+        if verbose and epoch % max(1, Nepoch // 10) == 0:
+            print(f"epoch {epoch:4d} | loss = {loss.item():.4f}")
+    return w, w0, Loss
+
+
+def plot_training(X, Y, w, w0, Loss, title=""):
+    """Affiche cote a cote la courbe de loss et la droite apprise."""
+    fig, axs = plt.subplots(1, 2, figsize=(11, 4))
+    axs[0].plot(Loss)
+    axs[0].set_xlabel("epoch"); axs[0].set_ylabel("loss (MSE)")
+    axs[0].set_title("Evolution de la loss"); axs[0].grid(alpha=.3)
+
+    xs = th.linspace(0, 8, 2)                  # 2 points suffisent pour une droite
+    axs[1].plot(xs, (w * xs + w0).detach(), 'r', label='droite apprise')
+    axs[1].scatter(X, Y, label='donnees')
+    axs[1].set_xlabel('x'); axs[1].set_ylabel('y')
+    axs[1].set_title("Modele appris"); axs[1].legend(); axs[1].grid(alpha=.3)
+    fig.suptitle(title)
+    plt.tight_layout(); plt.show()
+
+
+w, w0, Loss = training(X, Y, Nepoch=Nepoch, lr=lr, verbose=True)
+plot_training(X, Y, w, w0, Loss, title=f"Nepoch={Nepoch}, lr={lr}")
+print("loss initiale :", Loss[0], "| loss finale :", Loss[-1])
+
+"""Avec seulement 10 epochs la droite n'a pas eu le temps de converger.
+On relance beaucoup plus longtemps pour verifier que le modele retrouve bien
+les parametres qui ont servi a generer les donnees (w ~ 2, w0 ~ 0.5) :
+"""
+
+w, w0, Loss = training(X, Y, Nepoch=500, lr=0.01)
+plot_training(X, Y, w, w0, Loss, title="Nepoch=500, lr=0.01")
+print(f"w = {w.item():.3f} (attendu ~2)   w0 = {w0.item():.3f} (attendu ~0.5)")
+
+"""Comparaison de plusieurs learning rates sur le meme probleme.
+On voit le compromis classique : trop petit -> convergence lente ;
+trop grand -> la loss oscille voire diverge.
+"""
+
+plt.figure(figsize=(7, 4))
+for lr_test in [0.001, 0.01, 0.05, 0.1]:
+    th.manual_seed(0)                       # meme initialisation pour comparer
+    _, _, L = training(X, Y, Nepoch=200, lr=lr_test)
+    plt.plot(L, label=f"lr = {lr_test}")
+plt.yscale("log")                           # echelle log : les ecarts sont enormes
+plt.xlabel("epoch"); plt.ylabel("loss (MSE, echelle log)")
+plt.title("Influence du learning rate"); plt.legend(); plt.grid(alpha=.3)
 plt.show()
-# ....
-
-print(Loss)
 
 """## 7) Module
 
@@ -545,31 +635,47 @@ X = X.view(-1, 1)  # IMPORTANT: reshape en (8, 1) pour nn.Linear
 Y = Y.view(-1, 1)
 
 #training+model
-Nepoch = 10
+Nepoch = 500
 lr = 0.01
 
-model=nn.Linear(1,1)
+model = nn.Linear(1, 1)          # equivaut a f(x) = w*x + w0, mais w et w0 sont geres par le module
 sgd = th.optim.SGD(model.parameters(), lr=lr)
+mse = nn.MSELoss()
 
-Loss=[]
+Loss = []
 for i in range(Nepoch):
-  Y_pred=model(X)
-  loss=((Y_pred-Y).pow(2)).mean()
-  Loss.append(loss.item())
-  loss.backward()
-  sgd.step()
-  sgd.zero_grad()
+    Y_pred = model(X)
+    loss = mse(Y_pred, Y)
+    Loss.append(loss.item())
+    loss.backward()
+    sgd.step()
+    sgd.zero_grad()
 
-plt.plot(th.linspace(0,Nepoch,Nepoch).detach(),Loss)
-plt.figure()
-xs = th.linspace(0,8,2) # need 2 points for a line
-plt.plot(xs,(w*xs+w0).detach(),'r', label = 'Uptaded line')
-plt.scatter(X,Y, label = 'data')
-plt.xlabel('x')
-plt.ylabel('y')
-plt.legend()
-plt.show()
-## Your code here
+# ATTENTION : ici la droite doit etre tracee avec les parametres DU MODELE
+# (model.weight / model.bias), et surtout pas avec les w, w0 des cellules
+# precedentes qui n'ont plus rien a voir avec cet entrainement.
+fig, axs = plt.subplots(1, 2, figsize=(11, 4))
+axs[0].plot(Loss); axs[0].set_xlabel("epoch"); axs[0].set_ylabel("loss")
+axs[0].set_title("Loss (module nn.Linear)"); axs[0].grid(alpha=.3)
+
+xs = th.linspace(0, 8, 2).view(-1, 1)   # (2,1) : nn.Linear attend un batch
+with th.no_grad():                      # pas besoin du graphe pour un simple trace
+    ys = model(xs)
+axs[1].plot(xs, ys, 'r', label='droite apprise')
+axs[1].scatter(X, Y, label='data')
+axs[1].set_xlabel('x'); axs[1].set_ylabel('y'); axs[1].legend(); axs[1].grid(alpha=.3)
+axs[1].set_title("Modele nn.Linear")
+plt.tight_layout(); plt.show()
+
+# Les parametres appris sont exactement les memes qu'a la main :
+print("w  (model.weight) =", model.weight.item())
+print("w0 (model.bias)   =", model.bias.item())
+
+# Un Module expose ses parametres, ce qui evite de les lister soi-meme
+# quand le modele devient gros (c'est tout l'interet) :
+for name, p in model.named_parameters():
+    print(f"{name:12s} shape={tuple(p.shape)}  requires_grad={p.requires_grad}")
+print("Nombre total de parametres :", sum(p.numel() for p in model.parameters()))
 
 """## 8) Logistic Regression
 
@@ -656,10 +762,17 @@ The model is a linear transformation followed by a Sigmoid function. This is equ
 D_in=2  # input size : 2
 D_out=1 # output size: one value
 
-model=nn.Sequential(nn.Linear(2,1),nn.Sigmoid())
+model = nn.Sequential(nn.Linear(D_in, D_out), nn.Sigmoid())
 lr = 0.01
 optimizer = th.optim.SGD(model.parameters(), lr=lr)
+
+# BCELoss = Binary Cross Entropy : la loss de la classification binaire.
+#   L = -[ y*log(p) + (1-y)*log(1-p) ],  avec p = sortie du Sigmoid
+# Elle ATTEND des probabilites (donc un Sigmoid avant), contrairement a
+# BCEWithLogitsLoss qui prend les logits bruts et integre le sigmoid
+# (numeriquement plus stable : c'est ce qu'on utilise en pratique).
 criterion = nn.BCELoss()
+loss_fn = criterion          # alias utilise dans les cellules de test ci-dessous
 
 """#### Testing the model with data
 You can run inference to see if everything is fine.
@@ -820,3 +933,129 @@ optimizer = th.optim.SGD(model.parameters(), lr=learning_rate)
 """
 
 ## Your code here
+def train_logistic(X, Y, lr=0.01, Nepochs=500, mode="stochastic", seed=0):
+    """Entraine une regression logistique et renvoie (model, historique de loss).
+
+    mode = "stochastic" : une mise a jour par exemple (online / SGD pur)
+    mode = "batch"      : une seule mise a jour par epoch, sur tout le dataset
+    """
+    th.manual_seed(seed)                      # meme init pour toutes les comparaisons
+    model = nn.Sequential(nn.Linear(D_in, D_out), nn.Sigmoid())
+    optimizer = th.optim.SGD(model.parameters(), lr=lr)
+    criterion = nn.BCELoss()
+
+    Loss = []
+    for epoch in range(Nepochs):
+        if mode == "stochastic":
+            epoch_loss = 0.0
+            for i in range(len(X)):
+                y_pred = model(X[i:i+1])      # X[i:i+1] et pas X[i] : il faut garder la dim de batch
+                loss = criterion(y_pred, Y[i:i+1])
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            Loss.append(epoch_loss / len(X))
+        elif mode == "batch":
+            y_pred = model(X)                 # tout le dataset d'un coup
+            loss = criterion(y_pred, Y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            Loss.append(loss.item())
+        else:
+            raise ValueError("mode doit valoir 'stochastic' ou 'batch'")
+    return model, Loss
+
+
+def accuracy(model, X, Y):
+    """Taux de bonne classification (seuil de decision a 0.5)."""
+    with th.no_grad():
+        pred = (model(X) > 0.5).float()
+    return (pred == Y).float().mean().item()
+
+"""#### Mode stochastique *vs* mode batch
+
+Meme modele, meme learning rate, meme nombre d'epochs : seule la **granularite
+de la mise a jour** change.
+
+- **stochastique** : 14 mises a jour par epoch (une par etudiant) ;
+- **batch** : 1 seule mise a jour par epoch, calculee sur les 14 exemples.
+
+A nombre d'epochs egal, le mode stochastique avance donc 14 fois plus vite en
+nombre de pas, ce qui se voit tout de suite sur la courbe. En contrepartie sa
+courbe est plus bruitee : chaque pas suit le gradient d'un seul exemple, qui
+n'est qu'une estimation tres bruitee du "vrai" gradient.
+"""
+
+model_sto, Loss_sto = train_logistic(X, Y, lr=0.01, Nepochs=500, mode="stochastic")
+model_bat, Loss_bat = train_logistic(X, Y, lr=0.01, Nepochs=500, mode="batch")
+
+plt.figure(figsize=(7, 4))
+plt.plot(Loss_sto, label=f"stochastique (acc={accuracy(model_sto, X, Y):.2f})")
+plt.plot(Loss_bat, label=f"batch        (acc={accuracy(model_bat, X, Y):.2f})")
+plt.xlabel("epoch"); plt.ylabel("BCE loss")
+plt.title("Stochastique vs batch, lr = 0.01"); plt.legend(); plt.grid(alpha=.3)
+plt.show()
+
+plot_decision_boundary(model_sto, X, Y, 'Mode stochastique')
+plot_decision_boundary(model_bat, X, Y, 'Mode batch')
+
+"""#### Impact du learning rate
+
+On reprend le mode batch et on ne fait varier que `lr`.
+"""
+
+plt.figure(figsize=(7, 4))
+resultats = {}
+for lr_test in [1e-2, 1e-1, 0.5]:
+    m, L = train_logistic(X, Y, lr=lr_test, Nepochs=500, mode="batch")
+    resultats[lr_test] = (m, L)
+    plt.plot(L, label=f"lr = {lr_test}  (loss finale = {L[-1]:.3f})")
+plt.xlabel("epoch"); plt.ylabel("BCE loss")
+plt.title("Influence du learning rate (mode batch)"); plt.legend(); plt.grid(alpha=.3)
+plt.show()
+
+for lr_test, (m, L) in resultats.items():
+    print(f"lr = {lr_test:<5} | loss finale = {L[-1]:.4f} | accuracy = {accuracy(m, X, Y):.3f}")
+
+"""#### Reponses aux questions
+
+**1. Compare la loss finale pour les differents learning rates.**
+Plus le learning rate est grand, plus la loss descend vite *au debut*. Avec
+`lr = 1e-2` la loss est encore loin de son minimum au bout de 500 epochs :
+le pas est trop petit pour la courbure du probleme.
+
+**2. Peut-on atteindre la meme valeur avec `lr = 1e-2` mais un entrainement plus long ?**
+Oui. Ici la loss est convexe (regression logistique = probleme convexe), il n'y
+a donc **qu'un seul minimum** et tout learning rate suffisamment petit finit par
+l'atteindre. Le learning rate ne change pas *ou* on converge, seulement *en
+combien de temps*. C'est une propriete de ce probleme precis : des qu'on aura
+des reseaux profonds (donc des loss non convexes), le learning rate influencera
+aussi *vers quel* minimum on tombe.
+
+**3. Avec `lr = 0.5` ?**
+La descente est beaucoup plus rapide, et sur ce jeu de donnees elle reste
+stable car la loss logistique a un gradient borne (le sigmoid sature). Sur un
+probleme moins bien conditionne, un pas aussi grand ferait osciller la loss,
+voire diverger : on "saute" par-dessus le minimum a chaque pas.
+
+Un dernier point important : les notes brutes vont de 0 a 20 et ne sont pas
+normalisees. Les gradients selon les deux features sont donc d'echelles tres
+differentes, ce qui rend la surface de loss allongee et ralentit la descente.
+Normaliser les entrees (moyenne 0, ecart-type 1) est presque toujours une bonne
+idee - c'est exactement ce qu'on fera dans le TP meteo.
+"""
+
+Xn = (X - X.mean(dim=0)) / X.std(dim=0)      # whitening des deux features
+model_n, Loss_n = train_logistic(Xn, Y, lr=0.01, Nepochs=500, mode="batch")
+
+plt.figure(figsize=(7, 4))
+plt.plot(Loss_bat, label="donnees brutes")
+plt.plot(Loss_n, label="donnees normalisees")
+plt.xlabel("epoch"); plt.ylabel("BCE loss")
+plt.title("Effet de la normalisation des entrees (lr = 0.01, batch)")
+plt.legend(); plt.grid(alpha=.3); plt.show()
+
+print(f"loss finale brute       : {Loss_bat[-1]:.4f}  (acc = {accuracy(model_bat, X, Y):.3f})")
+print(f"loss finale normalisee  : {Loss_n[-1]:.4f}  (acc = {accuracy(model_n, Xn, Y):.3f})")
