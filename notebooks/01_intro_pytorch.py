@@ -298,7 +298,7 @@ _ = plt.scatter(X,Y)
 _ = plt.xlabel('x')
 _ = plt.ylabel('y')
 
-"""Our goal is to approximate this simple data set with a function $f$ such that
+r"""Our goal is to approximate this simple data set with a function $f$ such that
 $$
 y_i \approx f(x_i).
 $$

@@ -1,0 +1,37 @@
+# Données téléchargées par les notebooks (volumineuses, régénérables)
+data/
+*.pk.gz
+*.pck
+*.npy
+tinyshakespeare.txt
+cifar-10-*/
+
+# Sorties d'entraînement
+gpt2-finetuned/
+checkpoints/
+*.pt
+*.pth
+runs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Fichiers intermédiaires de génération du cours
+cours/build/
+
+# Systèmes
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp

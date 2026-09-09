@@ -167,7 +167,7 @@ plt.imshow(F.relu(res).squeeze().detach(), matplotlib.pyplot.cm.gray)
 
 print(W)
 
-"""Now try to set the convolution fiter as follows:
+r"""Now try to set the convolution fiter as follows:
 $$
 \left(
 \begin{array}{ccc}
@@ -842,7 +842,7 @@ else:
     print("Pas de GPU detecte : entrainement de VGG-16 ignore.")
     print("Sur GPU, comptez ~15 min pour 30 epochs et ~92 % d'accuracy test.")
 
-"""## Bilan du TP
+r"""## Bilan du TP
 
 | Modele | Donnees | Parametres | Accuracy |
 |---|---|---:|---:|

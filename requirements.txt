@@ -1,0 +1,22 @@
+# Dépendances communes à tous les TP
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+matplotlib>=3.7
+pandas>=2.0
+
+# TP 01-03 : téléchargement des jeux de données depuis Google Drive
+gdown>=4.7
+
+# TP 04 : affichage des matrices en ASCII
+tabulate>=0.9
+
+# TP 06 : tokenizer BPE et fine-tuning de GPT-2
+tokenizers>=0.15
+transformers>=4.40
+datasets>=2.18
+accelerate>=0.28
+
+# TP 07 : Fourier Neural Operator
+# (s'installe sous le nom "neuraloperator", s'importe sous le nom "neuralop")
+neuraloperator>=1.0

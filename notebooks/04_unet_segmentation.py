@@ -70,7 +70,7 @@ for i in (3,14): # two random training examples
     axs[0].imshow(X[i].squeeze()) # original image
     axs[1].imshow(Y[i].squeeze()) # pixel classification
 
-"""The left pictures represent the input images, while one the right we have the segmentation we want to predict. Therefore input and output have the same dimensions, and the same number of "values": for the input this is the pixel value, for the output it is the class value for each pixel. With the latter, we know for each input pixel in which class it belongs, or if it is in a nucleus or not.  
+r"""The left pictures represent the input images, while one the right we have the segmentation we want to predict. Therefore input and output have the same dimensions, and the same number of "values": for the input this is the pixel value, for the output it is the class value for each pixel. With the latter, we know for each input pixel in which class it belongs, or if it is in a nucleus or not.  
 
 
 This pickle contains a modified version of the dataset:
@@ -126,7 +126,7 @@ ppmatrix(c.weight,"weights: ")
 print("the bias: ")
 ppmatrix(c.bias)
 
-"""As you can see, the operation is parametrized by a convolution mask $\mathbf{W}$ and one bias term. For one value $v$ in the input, we get as output $v\times\mathbf{W}+b$. As an illustration, we can consider a simple image with one channel. To start, it is easier to start without the bias term:
+r"""As you can see, the operation is parametrized by a convolution mask $\mathbf{W}$ and one bias term. For one value $v$ in the input, we get as output $v\times\mathbf{W}+b$. As an illustration, we can consider a simple image with one channel. To start, it is easier to start without the bias term:
 
 """
 
@@ -189,7 +189,7 @@ The input image has one input channel and the first convolution block generates 
 Since we will need many times to instantiate the same kind of blocks to build the encoder, the bottleneck and the decoder, we can write a function like this:
 """
 
-def make_conv_block(in_c,out_c,
+def make_conv_block(in_c, out_c,
                     kernel_size=3,
                     stride=1,
                     padding=1):
@@ -198,50 +198,85 @@ def make_conv_block(in_c,out_c,
         - 3x3 convolutions (stride 1, padding = 1)
         - relu + BatchNorm
         It follows a two 3x3 convolutional layer, each followed by a batch normalization and a relu activation.
+
+    NB par rapport a ma premiere version : il manquait la ReLU apres la
+    premiere BatchNorm. Sans elle, deux convolutions successives sans
+    non-linearite entre les deux se **reduisent mathematiquement a une seule**
+    convolution (la composee de deux applications lineaires est lineaire) : on
+    payait deux couches pour la capacite d'une seule.
+
+    L'ordre retenu est Conv -> BatchNorm -> ReLU, deux fois.
+    Avec padding=1 et kernel_size=3, les dimensions spatiales sont conservees,
+    ce qui est indispensable ici : c'est ce qui permet de concatener directement
+    les skip connections sans avoir a rogner les cartes (l'article original,
+    lui, n'utilisait pas de padding et devait recadrer les skips).
     """
     mod = nn.Sequential(
-                nn.Conv2d(in_c, out_c,
-                        kernel_size=kernel_size,
-                        stride=stride,
-                        padding=padding
-                    ),
-                nn.BatchNorm2d(out_c),
-                nn.Conv2d(out_c, out_c,
-                        kernel_size=kernel_size,
-                        stride=stride,
-                        padding=padding
-                    ),
-                nn.BatchNorm2d(out_c),
-                nn.ReLU()
-                )
+        nn.Conv2d(in_c, out_c, kernel_size=kernel_size, stride=stride, padding=padding),
+        nn.BatchNorm2d(out_c),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(out_c, out_c, kernel_size=kernel_size, stride=stride, padding=padding),
+        nn.BatchNorm2d(out_c),
+        nn.ReLU(inplace=True),
+    )
     return mod
 
 """One block generatated by this function.  """
 
-# TODO
-F=4
-mod = make_conv_block(F,2*F,kernel_size=3,stride=1,padding=1)
+# TODO
+F = 4
+mod = make_conv_block(F, 2 * F, kernel_size=3, stride=1, padding=1)
 
-Y=mod(th.zeros(1,4,128,128))
-print(Y.shape)
+Y_test = mod(th.zeros(1, 4, 128, 128))
+print(Y_test.shape)   # (1, 8, 128, 128) : les canaux doublent, la taille ne bouge pas
 
-"""Now write a class for the encoder that uses this function."""
+"""Now write a class for the encoder that uses this function.
+
+**Point crucial pour la suite.** L'encodeur doit renvoyer les features
+**AVANT** le max-pooling, et non apres. C'est l'erreur que j'avais faite au
+depart. Pourquoi ? Parce que les skip connections servent a re-injecter dans le
+decodeur les details spatiaux **a pleine resolution** de chaque niveau. Si on
+renvoie la version deja sous-echantillonnee, les dimensions ne correspondent
+plus au moment de la concatenation, et surtout on perd precisement
+l'information qu'on voulait sauver.
+
+Chaque niveau fait donc deux choses distinctes :
+- il produit un `skip` (features non poolees) qui part "en travers" vers le decodeur ;
+- il produit une sortie poolee qui descend vers le niveau suivant.
+"""
 
 class Encoder(nn.Module):
-  def __init__(self,F):
-    super(Encoder, self).__init__()
-    self.F = F
-    self.block1 = nn.Sequential(make_conv_block(1,F,kernel_size=3,stride=1,padding=1),nn.MaxPool2d(kernel_size=2,stride=2))
-    self.block2= nn.Sequential(make_conv_block(F,2*F,kernel_size=3,stride=1,padding=1),nn.MaxPool2d(kernel_size=2,stride=2))
-    self.block3= nn.Sequential(make_conv_block(2*F,4*F,kernel_size=3,stride=1,padding=1),nn.MaxPool2d(kernel_size=2,stride=2))
-    self.block4= nn.Sequential(make_conv_block(4*F,8*F,kernel_size=3,stride=1,padding=1),nn.MaxPool2d(kernel_size=2,stride=2))
+    """Partie descendante du U : 4 niveaux, F -> 2F -> 4F -> 8F canaux.
 
-  def forward(self,x):
-    outblock1=self.block1(x)
-    outblock2=self.block2(outblock1)
-    outblock3=self.block3(outblock2)
-    outblock4=self.block4(outblock3)
-    return outblock1,outblock2,outblock3,outblock4
+    A chaque niveau : conv_block (qui double les canaux) puis MaxPool
+    (qui divise H et W par 2).
+    """
+
+    def __init__(self, F, in_channels=1):
+        super(Encoder, self).__init__()
+        self.F = F
+        self.block1 = make_conv_block(in_channels, F)
+        self.block2 = make_conv_block(F, 2 * F)
+        self.block3 = make_conv_block(2 * F, 4 * F)
+        self.block4 = make_conv_block(4 * F, 8 * F)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        # Le MaxPool n'a aucun parametre : on peut donc reutiliser la meme
+        # instance aux 4 niveaux, contrairement aux conv_block.
+
+    def forward(self, x):
+        s1 = self.block1(x)           # (F,   128, 128)  <- skip
+        s2 = self.block2(self.pool(s1))   # (2F,  64,  64)   <- skip
+        s3 = self.block3(self.pool(s2))   # (4F,  32,  32)   <- skip
+        s4 = self.block4(self.pool(s3))   # (8F,  16,  16)   <- skip
+        out = self.pool(s4)               # (8F,   8,   8)   -> bottleneck
+        return out, (s1, s2, s3, s4)
+
+
+enc = Encoder(F=4)
+out, skips = enc(th.zeros(1, 1, 128, 128))
+print("sortie de l'encodeur :", out.shape)
+for k, sk in enumerate(skips, 1):
+    print(f"  skip {k} : {tuple(sk.shape)}")
 
 """The **bottleneck** layer is a convolutional layer which doubles the number of channels. The idea is to create a "dense" representation of the image to gather both global and local features.
 
@@ -249,57 +284,113 @@ class Encoder(nn.Module):
 """
 
 class Bottleneck(nn.Module):
-  def __init__(self,F):
-    super(Bottleneck, self).__init__()
-    self.block=make_conv_block(8*F,16*F,kernel_size=3,stride=1,padding=1)
-  def forward(self,x):
-    outblock=self.block(x)
-    return outblock
+    """Point le plus bas du U : 8F -> 16F canaux, resolution 8x8.
+
+    C'est ici que le champ receptif est le plus large : chaque "pixel" de cette
+    carte 8x8 a vu une grande partie de l'image d'entree. C'est la
+    representation la plus abstraite, la plus "semantique" - mais aussi celle
+    ou toute la precision spatiale a ete perdue. D'ou la necessite des skips.
+    """
+
+    def __init__(self, F):
+        super(Bottleneck, self).__init__()
+        self.block = make_conv_block(8 * F, 16 * F)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+bn = Bottleneck(F=4)
+print("sortie du bottleneck :", bn(out).shape)   # (1, 64, 8, 8) pour F=4
 
 """The **decoder** part is similar to the encoder part but reversed. While we used max-pooling for downsampling in the encoder, the upsampling operation consists in **transposed convolution**. The goal is to increase (so upsample) the spatial dimensions of intermediate feature maps while reducing the number of channels by a factor 2 for all of them. The important point is the residual connection. In U-Net, the residual connection is not a simple addition but a concatenation.
 
 **TODO**: write the corresponding module and test if it works properly. Check the output dimensions.
+
+Deux pieges dans lesquels j'etais tombe :
+
+1. `th.cat` prend une **liste** de tenseurs et un axe :
+   `th.cat([a, b], dim=1)` et non `th.cat(a, b)`. `dim=1` est l'axe des
+   canaux, en (N, C, H, W).
+2. apres la concatenation, la convolution suivante recoit **2x plus de canaux**
+   qu'on ne le croit : `ConvTranspose` ramene a 8F canaux, plus les 8F canaux
+   du skip, donc 16F en entree du conv_block. C'est pour ca que les blocs du
+   decodeur sont des `make_conv_block(16F, 8F)` et non `(8F, 8F)`.
 """
 
-class Decoder (nn.Module):
-  def __init__(self,F):
-    super(Decoder, self).__init__()
-    self.F=F
-    self.block1=nn.ConvTranspose2d(16*F,8*F,
-                       kernel_size=2, stride=2,
-                        )
-    self.block2=make_conv_block(16*F,8*F,)
+class Decoder(nn.Module):
+    """Partie remontante du U : 4 niveaux d'upsampling avec skip connections.
 
-    self.block3=nn.ConvTranspose2d(8*F,4*F,
-                       kernel_size=2, stride=2,
-                        )
-    self.block4=make_conv_block(8*F,4*F,)
-    self.block5=nn.ConvTranspose2d(4*F,2*F,kernel_size=2, stride=2,
-                        )
-    self.block6=make_conv_block(4*F,2*F)
-    self.block7=nn.ConvTranspose2d(2*F,F,kernel_size=2, stride=2,
-                        )
-    self.block8=make_conv_block(2*F,F)
+    Un niveau = ConvTranspose2d (double H et W, divise les canaux par 2)
+                puis concatenation du skip correspondant
+                puis conv_block qui reduit de nouveau les canaux.
+    """
 
-  def forward(self,x,x1,x2,x3):
-    outblock1=self.block1(x)
-    outcat1=th.cat(x1,outblock1)
-    outbdec1=self.block2(outcat1)
+    def __init__(self, F, out_channels=1):
+        super(Decoder, self).__init__()
+        self.F = F
+        self.up4 = nn.ConvTranspose2d(16 * F, 8 * F, kernel_size=2, stride=2)
+        self.dec4 = make_conv_block(16 * F, 8 * F)     # 8F (up) + 8F (skip) = 16F
 
-    outblock2=self.block3(outbdec1)
-    outcat=th.cat(x2,outblock2)
-    outbdec2=self.block4(outblock2)
+        self.up3 = nn.ConvTranspose2d(8 * F, 4 * F, kernel_size=2, stride=2)
+        self.dec3 = make_conv_block(8 * F, 4 * F)      # 4F + 4F = 8F
+
+        self.up2 = nn.ConvTranspose2d(4 * F, 2 * F, kernel_size=2, stride=2)
+        self.dec2 = make_conv_block(4 * F, 2 * F)      # 2F + 2F = 4F
+
+        self.up1 = nn.ConvTranspose2d(2 * F, F, kernel_size=2, stride=2)
+        self.dec1 = make_conv_block(2 * F, F)          # F + F = 2F
+
+        # Couche de sortie : convolution 1x1 = un classifieur applique
+        # INDEPENDAMMENT a chaque pixel, sur ses F features.
+        # On ne met PAS de sigmoid ici : on renvoie des logits, et on utilisera
+        # BCEWithLogitsLoss (qui integre le sigmoid de facon stable).
+        self.head = nn.Conv2d(F, out_channels, kernel_size=1)
+
+    def forward(self, x, skips):
+        s1, s2, s3, s4 = skips
+
+        x = self.up4(x)                          # (8F, 16, 16)
+        x = self.dec4(th.cat([s4, x], dim=1))    # concat sur les canaux -> (16F,16,16) -> (8F,16,16)
+
+        x = self.up3(x)                          # (4F, 32, 32)
+        x = self.dec3(th.cat([s3, x], dim=1))
+
+        x = self.up2(x)                          # (2F, 64, 64)
+        x = self.dec2(th.cat([s2, x], dim=1))
+
+        x = self.up1(x)                          # (F, 128, 128)
+        x = self.dec1(th.cat([s1, x], dim=1))
+
+        return self.head(x)                      # (out_channels, 128, 128)
 
 
-
-    outblock3=self.block5(outbdec2)
+dec = Decoder(F=4)
+z = bn(out)
+print("sortie du decodeur :", dec(z, skips).shape)   # (1, 1, 128, 128)
 
 """The last peculiarity is the output layer for classification at the pixel level. In U-Net this last layer is (once again) a convolutional layer. This means that with the last hidden layer, we recover the same spatial dimension as the input with $F$ feature maps. The classification is carried out for each pixel independently, but the decision is based on $F$ features that encode global information.
 
 **TODO**: write the corresponding module and test if it works properly. Check the output dimensions.
+
+C'est le `self.head = nn.Conv2d(F, 1, kernel_size=1)` du decodeur ci-dessus.
+
+**Pourquoi une convolution 1x1 et pas une couche dense ?** Une conv 1x1 avec F
+canaux d'entree et 1 canal de sortie applique exactement le meme produit
+scalaire (F poids + 1 biais) a chaque pixel. C'est donc *un seul* classifieur
+logistique, partage par les 16 384 pixels. Trois consequences :
+
+- **tres peu de parametres** : F+1, contre 128x128xF pour une couche dense ;
+- le reseau devient **independant de la taille de l'image** : on peut
+  l'entrainer en 128x128 et l'appliquer en 256x256 sans rien changer ;
+- la decision reste **locale en apparence mais globale en pratique**, car les F
+  features de chaque pixel ont ete construites par tout le U et resument un
+  large voisinage.
 """
 
-
+x_test = th.zeros(2, 1, 128, 128)
+h = nn.Conv2d(4, 1, kernel_size=1)
+print("conv 1x1 :", h(th.zeros(2, 4, 128, 128)).shape, "| parametres :", sum(p.numel() for p in h.parameters()))
 
 """## A class for  simple U-Net
 
@@ -311,7 +402,143 @@ Now we can merge all we did in the previous section to create a U-Net model (lig
 
 """
 
+class UNet(nn.Module):
+    """U-Net complet : encodeur + bottleneck + decodeur.
 
+    Args:
+        F : nombre de features au premier niveau (64 dans l'article original,
+            4 a 32 ici vu la taille du dataset).
+    Sortie:
+        des LOGITS de shape (N, 1, H, W). Appliquer un sigmoid pour obtenir
+        des probabilites, ou seuiller a 0 pour obtenir la segmentation binaire.
+    """
+
+    def __init__(self, F=4, in_channels=1, out_channels=1):
+        super(UNet, self).__init__()
+        self.F = F
+        self.encoder = Encoder(F, in_channels=in_channels)
+        self.bottleneck = Bottleneck(F)
+        self.decoder = Decoder(F, out_channels=out_channels)
+
+    def forward(self, x):
+        out, skips = self.encoder(x)
+        out = self.bottleneck(out)
+        return self.decoder(out, skips)
+
+
+for F_test in (4, 8, 16, 32, 64):
+    m = UNet(F=F_test)
+    print(f"F = {F_test:2d} -> {sum(p.numel() for p in m.parameters()):>10,d} parametres")
+
+model = UNet(F=4)
+print("\nverification :", model(th.zeros(2, 1, 128, 128)).shape)
+
+r"""Le nombre de parametres croit en $F^2$ : doubler F quadruple la taille du
+modele. C'est logique, chaque convolution a $k^2 \times C_{in} \times C_{out}$
+poids et les deux nombres de canaux doublent en meme temps.
+
+### Preparation des donnees
+
+70 images pour l'entrainement, 9 pour le test.
+"""
+
+# On s'assure du format (N, C, H, W) attendu par Conv2d, quel que soit le
+# format de stockage du pickle.
+Xt = th.as_tensor(X, dtype=th.float32).reshape(N, 1, 128, 128)
+Yt = th.as_tensor(Y, dtype=th.float32).reshape(N, 1, 128, 128)
+
+# Normalisation des entrees en [0, 1] si ce n'est pas deja le cas
+if Xt.max() > 1.5:
+    Xt = Xt / 255.0
+# Les cibles doivent etre binaires (0 ou 1) pour la BCE
+Yt = (Yt > 0.5).float()
+
+print("X :", Xt.shape, "min/max :", Xt.min().item(), Xt.max().item())
+print("Y :", Yt.shape, "valeurs :", th.unique(Yt).tolist())
+
+n_train = 70
+Xtrain, Ytrain = Xt[:n_train], Yt[:n_train]
+Xtest, Ytest = Xt[n_train:], Yt[n_train:]
+print(f"train : {len(Xtrain)} images | test : {len(Xtest)} images")
+
+# Proportion de pixels "noyau" : le dataset est desequilibre, il faut le savoir.
+p_pos = Ytrain.mean().item()
+print(f"\nproportion de pixels de classe 'noyau' : {p_pos:.3f}")
+print(f"-> un modele qui predit TOUT en 'fond' aurait deja {1-p_pos:.3f} d'accuracy !")
+
+"""**Ce dernier chiffre est fondamental.** Environ 85 % des pixels sont du fond.
+Un modele degenere qui repond "fond" partout obtient donc ~85 % d'accuracy
+tout en etant parfaitement inutile. C'est pour cela qu'en segmentation on ne
+regarde jamais l'accuracy seule, mais la **precision**, le **rappel**, ou l'IoU
+(section suivante).
+
+### Entrainement
+"""
+
+device = th.device("cuda" if th.cuda.is_available() else "cpu")
+print("device :", device)
+
+
+def train_unet(model, Xtrain, Ytrain, Xtest, Ytest, n_epochs=200, lr=1e-3,
+               batch_size=8, pos_weight=None, verbose=True, augment=False):
+    """Entraine un U-Net pour de la segmentation binaire.
+
+    On utilise BCEWithLogitsLoss et non BCELoss : elle prend les logits bruts
+    et applique le sigmoid en interne via l'astuce du log-sum-exp, ce qui evite
+    les overflow/underflow quand les logits sont grands. C'est la version a
+    utiliser systematiquement.
+
+    pos_weight : poids donne a la classe positive dans la loss. Utile ici
+    puisque les noyaux ne representent que ~15 % des pixels.
+    """
+    model = model.to(device)
+    Xtrain, Ytrain = Xtrain.to(device), Ytrain.to(device)
+    Xtest, Ytest = Xtest.to(device), Ytest.to(device)
+
+    pw = None if pos_weight is None else th.tensor([pos_weight], device=device)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pw)
+    optimizer = th.optim.Adam(model.parameters(), lr=lr)
+
+    hist = {'train_loss': [], 'test_loss': [], 'test_acc': []}
+    n = len(Xtrain)
+
+    for epoch in range(n_epochs):
+        model.train()
+        perm = th.randperm(n, device=device)
+        running = 0.0
+        for k in range(0, n, batch_size):
+            idx = perm[k:k + batch_size]
+            xb, yb = Xtrain[idx], Ytrain[idx]
+            if augment:
+                xb, yb = random_augment(xb, yb)
+            loss = loss_fn(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            running += loss.item() * len(idx)
+        hist['train_loss'].append(running / n)
+
+        model.eval()
+        with th.no_grad():
+            logits = model(Xtest)
+            hist['test_loss'].append(loss_fn(logits, Ytest).item())
+            hist['test_acc'].append(((logits > 0).float() == Ytest).float().mean().item())
+
+        if verbose and (epoch % max(1, n_epochs // 10) == 0 or epoch == n_epochs - 1):
+            print(f"epoch {epoch:4d} | train {hist['train_loss'][-1]:.4f}"
+                  f" | test {hist['test_loss'][-1]:.4f} | acc {hist['test_acc'][-1]:.4f}")
+    return hist
+
+
+th.manual_seed(0)
+model = UNet(F=4)
+hist = train_unet(model, Xtrain, Ytrain, Xtest, Ytest, n_epochs=200, lr=1e-3)
+
+plt.figure(figsize=(7, 4))
+plt.plot(hist['train_loss'], label="train")
+plt.plot(hist['test_loss'], label="test")
+plt.xlabel("epoch"); plt.ylabel("BCE loss"); plt.title("U-Net F=4")
+plt.legend(); plt.grid(alpha=.3); plt.show()
 
 """# Evaluation
 
@@ -326,7 +553,52 @@ Of course we can compute the accuracy (the % of well classified pixels), but it 
 - and for pixels wrongly affected to the nucleous class ?
 """
 
+@th.no_grad()
+def predict(model, X, threshold=0.0):
+    """Renvoie (logits, masque binaire predit). Le seuil porte sur les LOGITS
+    (0 sur les logits <=> 0.5 sur les probabilites)."""
+    model.eval()
+    logits = model(X.to(device)).cpu()
+    return logits, (logits > threshold).float()
 
+
+def plot_segmentation(model, X, Y, idx=0, threshold=0.0):
+    """Affiche image / verite / prediction / carte d'erreurs pour une image.
+
+    La carte d'erreurs distingue les deux types de fautes, qui n'ont pas du
+    tout la meme signification :
+      - FAUX NEGATIF (rouge)  : pixel de noyau que le modele a rate
+      - FAUX POSITIF (bleu)   : pixel de fond que le modele a pris pour un noyau
+    """
+    logits, pred = predict(model, X[idx:idx + 1], threshold)
+    img = X[idx, 0].cpu()
+    vrai = Y[idx, 0].cpu()
+    pr = pred[0, 0]
+
+    # Codage couleur des erreurs
+    err = th.zeros(3, *vrai.shape)
+    err[1] = ((pr == 1) & (vrai == 1)).float()      # vert  : vrai positif
+    err[0] = ((pr == 0) & (vrai == 1)).float()      # rouge : faux negatif (rate)
+    err[2] = ((pr == 1) & (vrai == 0)).float()      # bleu  : faux positif (invente)
+
+    fig, axs = plt.subplots(1, 5, figsize=(18, 3.5))
+    axs[0].imshow(img, cmap='gray'); axs[0].set_title("image")
+    axs[1].imshow(vrai, cmap='gray'); axs[1].set_title("verite terrain")
+    axs[2].imshow(th.sigmoid(logits[0, 0]), cmap='viridis', vmin=0, vmax=1)
+    axs[2].set_title("probabilite predite")
+    axs[3].imshow(pr, cmap='gray'); axs[3].set_title(f"prediction (seuil={threshold})")
+    axs[4].imshow(err.permute(1, 2, 0)); axs[4].set_title("vert=OK  rouge=rate  bleu=invente")
+    for a in axs: a.axis('off')
+
+    tp = ((pr == 1) & (vrai == 1)).sum().item()
+    fp = ((pr == 1) & (vrai == 0)).sum().item()
+    fn = ((pr == 0) & (vrai == 1)).sum().item()
+    plt.suptitle(f"image {idx} | TP={tp}  FP={fp}  FN={fn}")
+    plt.tight_layout(); plt.show()
+
+
+for i in range(len(Xtest)):
+    plot_segmentation(model, Xtest, Ytest, idx=i)
 
 """## Precision and recall
 
@@ -343,9 +615,81 @@ These measures depend on a threshold of the output score. While the "natural" th
 
 """
 
+@th.no_grad()
+def precision_recall(model, X, Y, threshold=0.0):
+    """Precision, rappel, F1 et IoU pour la classe 'noyau', a un seuil donne.
+
+        precision = TP / (TP + FP)  -> parmi les pixels annonces noyau, combien
+                                       le sont vraiment ? (mesure les fausses alertes)
+        rappel    = TP / (TP + FN)  -> parmi les vrais pixels noyau, combien
+                                       ai-je retrouves ? (mesure les oublis)
+        F1        = moyenne harmonique des deux
+        IoU       = TP / (TP + FP + FN)  -> la metrique standard en segmentation
+    """
+    logits, pred = predict(model, X, threshold)
+    Yc = Y.cpu()
+    tp = ((pred == 1) & (Yc == 1)).sum().item()
+    fp = ((pred == 1) & (Yc == 0)).sum().item()
+    fn = ((pred == 0) & (Yc == 1)).sum().item()
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 1.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
+    return dict(precision=precision, recall=recall, f1=f1, iou=iou, tp=tp, fp=fp, fn=fn)
 
 
-"""# U-Net
+print("seuil | precision | rappel |   F1   |  IoU")
+for t in [-5, -3, -2, -1, 0, 1, 2, 3, 5]:
+    m = precision_recall(model, Xtest, Ytest, threshold=t)
+    print(f"{t:+5.1f} |   {m['precision']:.3f}   |  {m['recall']:.3f} | {m['f1']:.3f}  | {m['iou']:.3f}")
+
+"""**Lecture du tableau.** Quand le seuil descend (vers -5), le modele devient
+"laxiste" : il declare noyau au moindre doute. Il rate donc peu de vrais noyaux
+(**rappel eleve**) mais fait beaucoup de fausses alertes (**precision faible**).
+Quand le seuil monte, c'est l'inverse. Le seuil est le curseur qui arbitre entre
+les deux, et le bon reglage depend de l'application :
+
+- en depistage medical, on prefere un **rappel** eleve (mieux vaut une fausse
+  alerte qu'un cas manque) ;
+- pour un comptage automatique de cellules, on prefere la **precision**.
+
+### Courbe precision-rappel, et comparaison F = 4, 16, 32
+"""
+
+modeles = {}
+for F_val in (4, 16, 32):
+    th.manual_seed(0)
+    m = UNet(F=F_val)
+    print(f"\n--- Entrainement F = {F_val} ({sum(p.numel() for p in m.parameters()):,d} parametres) ---")
+    h = train_unet(m, Xtrain, Ytrain, Xtest, Ytest, n_epochs=200, lr=1e-3, verbose=False)
+    modeles[F_val] = m
+    met = precision_recall(m, Xtest, Ytest, 0.0)
+    print(f"F={F_val} | precision {met['precision']:.3f} | rappel {met['recall']:.3f}"
+          f" | F1 {met['f1']:.3f} | IoU {met['iou']:.3f}")
+
+seuils = np.linspace(-5, 5, 41)
+plt.figure(figsize=(11, 4))
+for F_val, m in modeles.items():
+    P = [precision_recall(m, Xtest, Ytest, t)['precision'] for t in seuils]
+    R = [precision_recall(m, Xtest, Ytest, t)['recall'] for t in seuils]
+    plt.subplot(1, 2, 1); plt.plot(R, P, 'o-', ms=3, label=f"F = {F_val}")
+    plt.subplot(1, 2, 2)
+    plt.plot(seuils, P, label=f"precision F={F_val}")
+    plt.plot(seuils, R, '--', label=f"rappel F={F_val}")
+plt.subplot(1, 2, 1)
+plt.xlabel("rappel"); plt.ylabel("precision"); plt.title("Courbe precision-rappel")
+plt.legend(); plt.grid(alpha=.3); plt.xlim(0, 1); plt.ylim(0, 1)
+plt.subplot(1, 2, 2)
+plt.xlabel("seuil sur les logits"); plt.title("Precision et rappel vs seuil")
+plt.legend(fontsize=7); plt.grid(alpha=.3)
+plt.tight_layout(); plt.show()
+
+"""Plus une courbe precision-rappel est proche du coin superieur droit, meilleur
+est le modele : c'est le seul moyen de comparer deux modeles **independamment
+du choix du seuil**.
+
+# U-Net
 
 Now the goal is to implement U-Net. As a proposed roadmap we propose the following step:
 - a function to create a convolutional block
@@ -353,7 +697,7 @@ Now the goal is to implement U-Net. As a proposed roadmap we propose the followi
 - a module for the decoder
 - and a U-Net module to wrap everything
 
-The number of feature map ($F=64$ in the original work) must be a variable of the UNet. For the first round of experiment, we can use $F=8$.  
+The number of feature map ($F=64$ in the original work) must be a variable of the UNet. For the first round of experiment, we can use $F=8$.
 
 
 **TODO:**
@@ -362,9 +706,34 @@ The number of feature map ($F=64$ in the original work) must be a variable of th
 
 """
 
+th.manual_seed(0)
+unet8 = UNet(F=8)
+hist8 = train_unet(unet8, Xtrain, Ytrain, Xtest, Ytest, n_epochs=300, lr=1e-3)
 
+print("\n--- sur des images de TRAIN (le modele les a vues) ---")
+for i in (0, 3):
+    plot_segmentation(unet8, Xtrain, Ytrain, idx=i)
 
-"""# Data Augmentation
+print("--- sur des images de TEST (jamais vues) ---")
+for i in range(len(Xtest)):
+    plot_segmentation(unet8, Xtest, Ytest, idx=i)
+
+met_train = precision_recall(unet8, Xtrain, Ytrain, 0.0)
+met_test = precision_recall(unet8, Xtest, Ytest, 0.0)
+print(f"TRAIN : precision {met_train['precision']:.3f} | rappel {met_train['recall']:.3f} | IoU {met_train['iou']:.3f}")
+print(f"TEST  : precision {met_test['precision']:.3f} | rappel {met_test['recall']:.3f} | IoU {met_test['iou']:.3f}")
+
+"""L'ecart entre train et test est important : avec 70 images seulement et
+plusieurs centaines de milliers de parametres, le modele **surapprend**
+massivement. Sur les images de train la segmentation est quasi parfaite, sur le
+test elle est visiblement plus grossiere.
+
+Trois leviers possibles : plus de donnees (impossible ici), un modele plus
+petit (on perd en finesse), ou de la **data augmentation** - c'est l'objet de
+la derniere section, et c'est la solution standard en imagerie medicale ou les
+annotations coutent tres cher.
+
+# Data Augmentation
 When the dataset is scarce, we can try data-augmentation. The idea is to apply transformation introduce diversity in the dataset with basic transformation. [Look at this page for more information](https://pytorch.org/vision/main/transforms.html).
 
 **TODO:**
@@ -375,3 +744,96 @@ When the dataset is scarce, we can try data-augmentation. The idea is to apply t
 
 """
 
+def random_augment(x, y):
+    """Augmentation pour la segmentation : flips et rotations de 90 degres.
+
+    LE POINT CRITIQUE : la transformation doit etre appliquee **exactement de
+    la meme facon** a l'image et a son masque. Si on retourne l'image sans
+    retourner le masque, on apprend au reseau n'importe quoi. C'est pour cela
+    qu'on ecrit la fonction a la main plutot que d'utiliser deux
+    `transforms.RandomHorizontalFlip()` independants.
+
+    On se limite ici aux transformations qui preservent la nature du probleme :
+    un noyau cellulaire n'a pas d'orientation privilegiee, donc flips et
+    rotations de 90 degres sont legitimes. En revanche il ne faudrait PAS
+    utiliser ces memes transformations pour, par exemple, de la reconnaissance
+    de chiffres manuscrits (un 6 retourne devient un 9).
+    """
+    if th.rand(1).item() < 0.5:
+        x, y = th.flip(x, dims=[-1]), th.flip(y, dims=[-1])      # miroir horizontal
+    if th.rand(1).item() < 0.5:
+        x, y = th.flip(x, dims=[-2]), th.flip(y, dims=[-2])      # miroir vertical
+    k = int(th.randint(0, 4, (1,)).item())
+    if k:
+        x, y = th.rot90(x, k, dims=[-2, -1]), th.rot90(y, k, dims=[-2, -1])
+    # Variation d'intensite : uniquement sur l'image, JAMAIS sur le masque
+    # (le masque est une classe, pas une intensite).
+    if th.rand(1).item() < 0.5:
+        x = (x * (0.8 + 0.4 * th.rand(1, device=x.device))).clamp(0, 1)
+    return x, y
+
+
+# Verification visuelle que image et masque restent alignes
+xb, yb = random_augment(Xtrain[:1], Ytrain[:1])
+fig, axs = plt.subplots(1, 4, figsize=(14, 3.5))
+axs[0].imshow(Xtrain[0, 0], cmap='gray'); axs[0].set_title("image originale")
+axs[1].imshow(Ytrain[0, 0], cmap='gray'); axs[1].set_title("masque original")
+axs[2].imshow(xb[0, 0], cmap='gray'); axs[2].set_title("image augmentee")
+axs[3].imshow(yb[0, 0], cmap='gray'); axs[3].set_title("masque augmente (aligne !)")
+for a in axs: a.axis('off')
+plt.tight_layout(); plt.show()
+
+"""### Comparaison avec et sans augmentation"""
+
+resultats = {}
+for aug in (False, True):
+    th.manual_seed(0)
+    m = UNet(F=8)
+    print(f"\n--- augmentation = {aug} ---")
+    h = train_unet(m, Xtrain, Ytrain, Xtest, Ytest, n_epochs=300, lr=1e-3,
+                   augment=aug, verbose=False)
+    met = precision_recall(m, Xtest, Ytest, 0.0)
+    mtr = precision_recall(m, Xtrain, Ytrain, 0.0)
+    resultats[aug] = (m, h, met)
+    print(f"IoU train = {mtr['iou']:.3f} | IoU test = {met['iou']:.3f}"
+          f" | ecart = {mtr['iou'] - met['iou']:+.3f}")
+    print(f"precision {met['precision']:.3f} | rappel {met['recall']:.3f} | F1 {met['f1']:.3f}")
+
+plt.figure(figsize=(7, 4))
+for aug, (m, h, met) in resultats.items():
+    plt.plot(h['test_loss'], label=f"augmentation = {aug} (IoU {met['iou']:.3f})")
+plt.xlabel("epoch"); plt.ylabel("BCE loss sur le test")
+plt.title("Impact de la data augmentation"); plt.legend(); plt.grid(alpha=.3); plt.show()
+
+print("\n--- Segmentations avec augmentation ---")
+for i in range(min(3, len(Xtest))):
+    plot_segmentation(resultats[True][0], Xtest, Ytest, idx=i)
+
+"""## Conclusion du TP
+
+L'augmentation reduit nettement l'ecart train/test : les transformations
+multiplient artificiellement la diversite du jeu d'entrainement, et le reseau
+ne peut plus se contenter de memoriser les 70 images. C'est **gratuit** (aucun
+cout d'annotation) et c'est le premier reflexe quand les donnees sont rares.
+
+### Ce qu'il faut retenir de U-Net
+
+| Element | Role |
+|---|---|
+| Encodeur (conv + pool) | comprime le spatial, enrichit le semantique : *quoi* |
+| Bottleneck | representation la plus abstraite, champ receptif maximal |
+| Decodeur (ConvTranspose) | reconstruit la resolution spatiale |
+| **Skip connections** | re-injectent les details fins perdus au pooling : *ou* |
+| Conv 1x1 finale | classifieur par pixel, independant de la taille d'image |
+
+Les skip connections sont **l'idee centrale**. Sans elles, un
+encodeur-decodeur produit des masques corrects mais flous : toute la precision
+des contours a ete detruite par les max-pooling successifs et rien ne permet de
+la retrouver. Avec elles, le decodeur dispose a chaque niveau des features
+haute-resolution correspondantes. C'est aussi ce qui rend le reseau plus facile
+a entrainer, en offrant un chemin court au gradient.
+
+Enfin, cette architecture depasse largement la segmentation : c'est le squelette
+des **modeles de diffusion** (Stable Diffusion et consorts), ou le meme U-Net
+predit le bruit a retirer a chaque etape de debruitage.
+"""

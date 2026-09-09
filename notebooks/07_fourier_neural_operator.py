@@ -54,7 +54,7 @@ print("Device:", device)
 torch.manual_seed(0)
 np.random.seed(0)
 
-"""## 0. Rappels : Darcy flow (milieux poreux)
+r"""## 0. Rappels : Darcy flow (milieux poreux)
 
 On modélise un écoulement dans un **milieu poreux** (sol, roche, filtre).
 
@@ -233,7 +233,7 @@ print("Batch x:", x.shape, "Batch y:", y.shape)
 in_channels = x.shape[1]
 print("Inferred in_channels:", in_channels)
 
-"""## 3. Visualisations : champs et flux
+r"""## 3. Visualisations : champs et flux
 
 On visualise $a(x,y)$, $u(x,y)$, et le flux $\mathbf{v}=-a \nabla u$.
 
@@ -295,7 +295,7 @@ show_darcy_example(x, y, title="Un exemple Darcy (train)")
 print('x:', x.shape)
 print('y:', y.shape)
 
-"""## 4. Losses et métriques : que mesurent-elles ?
+r"""## 4. Losses et métriques : que mesurent-elles ?
 
 NeuralOperator fournit des losses adaptées à l’apprentissage d’opérateurs (champs).
 
@@ -716,50 +716,82 @@ Comparez directement aux résultats U-Net.
 
 """
 
-fno= FNO2d(
-    n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
+def make_fno(kind="tfno", n_modes=None, hidden_channels=None, n_layers=None):
+    """Construit un FNO ou un TFNO avec la config courante.
+
+    kind = "fno"  -> FNO standard (poids spectraux pleins)
+           "tfno" -> version factorisee (Tucker), moins de parametres
+    """
+    cls = TFNO2d if kind == "tfno" else FNO2d
+    kwargs = dict(
+        n_modes=n_modes or config["fno"]["n_modes"],
+        hidden_channels=hidden_channels or config["fno"]["hidden_channels"],
+        in_channels=in_channels,
+        out_channels=1,
+        n_layers=n_layers or config["fno"]["n_layers"],
+    )
+    return cls(**kwargs)
 
 
-    n_layers=config["fno"]["n_layers"],
-
-)
-
-# Entraînement
-fno = train_with_trainer(fno, name="fFNO")
-
-Tfno= TFNO2d(
-    n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
+def count_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-    n_layers=config["fno"]["n_layers"],
+# --- Entrainement du FNO ---
+fno = make_fno("fno")
+print("FNO  :", count_params(fno), "parametres")
+fno = train_with_trainer(fno, name="FNO")
 
-)
-
-# Entraînement
-Tfno = train_with_trainer(fno, name="fFNO")
+# --- Entrainement du TFNO ---
+# ATTENTION au bug que j'avais laisse ici : j'ecrivais
+#     Tfno = train_with_trainer(fno, name="fFNO")
+# ce qui re-entrainait le FNO et rangeait le resultat dans Tfno. Les deux
+# variables pointaient alors sur le MEME modele, et toute la comparaison
+# FNO / TFNO qui suivait ne comparait rien du tout.
+Tfno = make_fno("tfno")
+print("TFNO :", count_params(Tfno), "parametres")
+Tfno = train_with_trainer(Tfno, name="TFNO")
 
 test32 = get_loader(test_loaders, idx=0)
 test64 = get_loader(test_loaders, idx=1)
 
-print("FNO test32:", evaluate_quick(fno, test32))
+print("\n--- Resultats ---")
+print("U-Net test32:", evaluate_quick(unet, test32))
+print("U-Net test64:", evaluate_quick(unet, test64))
+print("FNO   test32:", evaluate_quick(fno, test32))
+print("FNO   test64:", evaluate_quick(fno, test64))
+print("TFNO  test32:", evaluate_quick(Tfno, test32))
+print("TFNO  test64:", evaluate_quick(Tfno, test64))
+
 show_batch_predictions(fno, test32, title="FNO — test 32×32")
+show_batch_predictions(fno, test64, title="FNO — test 64×64 (zero-shot)")
+show_batch_predictions(Tfno, test64, title="TFNO — test 64×64 (zero-shot)")
+show_batch_predictions(unet, test64, title="U-Net — test 64×64 (zero-shot)")
 
-print("FNO test64:", evaluate_quick(fno, test64))
-show_batch_predictions(fno, test64, title="FNO — test 64×64 (Zero-shot)")
-show_batch_predictions(Tfno,test64,title="TFNO — test 64×64")
-show_batch_predictions(unet, test64, title="U-Net — test 64×64")
+r"""**Le resultat central du TP est dans ces quatre figures.**
 
-"""## 10. Ablations : protocole + interprétation
+En 32x32 (la resolution d'entrainement), U-Net et FNO se valent a peu pres.
+En 64x64 **sans reentrainement**, l'ecart est spectaculaire : le FNO produit
+encore un champ correct, l'U-Net s'effondre.
 
-Ici, l’objectif n’est pas de “faire du tuning” à l’infini, mais de **comprendre** ce que contrôlent les hyperparamètres.
+Pourquoi ? Parce que les deux ne parametrent pas la meme chose.
 
-- Choisissez un “réglage de base” (celui du notebook).
+- Une **convolution** apprend des poids attaches a une grille de pixels. Un
+  filtre 3x3 couvre 3/32 de l'image en 32x32, mais seulement 3/64 en 64x64 :
+  le meme filtre ne "voit" plus la meme echelle physique. Le reseau change donc
+  de comportement quand la grille change.
+- Une **couche de Fourier** apprend des poids attaches a des **modes**
+  (frequences), qui sont definis sur le domaine continu et non sur la grille.
+  Le mode k=3 est le mode k=3, que l'on echantillonne le domaine avec 32 ou
+  64 points. C'est ce qui rend le FNO *discretization invariant* : il approxime
+  un operateur entre espaces de fonctions, pas une application entre tableaux
+  de pixels.
+
+## 10. Ablations : protocole + interprétation
+
+Ici, l'objectif n'est pas de "faire du tuning" à l'infini, mais de **comprendre** ce que contrôlent les hyperparamètres.
+
+- Choisissez un "réglage de base" (celui du notebook).
 - **Changez un seul paramètre à la fois**, gardez le reste identique.
 - Pour CPU : mettez `n_train=128–256` et `n_epochs=5–10` pour que ça tourne vite.
 - Pour chaque run, notez :
@@ -767,134 +799,244 @@ Ici, l’objectif n’est pas de “faire du tuning” à l’infini, mais de **
   - `L2` et `H1` sur test 64×64
   - 1 ou 2 figures qualitatives
 
-### Tableau de résultats
-Voici un tableau qui peut être intéressant à remplir:
-
-| Modèle | loss train | n_modes | hidden | n_layers | test32 L2 | test32 H1 | test64 L2 | test64 H1 | commentaire |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| U‑Net | (—) | (—) | base=… | depth=… | … | … | … | … | … |
-| TFNO | l2/h1 | (m1,m2) | … | … | … | … | … | … | … |
-| … | … | … | … | … | … | … | … | … | … |
-
 ### Ablations conseillées
-1) **Loss** : `training_loss="l2"` vs `"h1"`  
-   - Quel impact a la loss de training?
+1) **Loss** : `training_loss="l2"` vs `"h1"`
+2) **Modes** : `n_modes=(8,8)`, `(12,12)`, `(16,16)`
+3) **Capacité** : `hidden_channels=8, 16, 32`
+4) (Option GPU) **TFNO vs FNO**
 
-2) **Modes** : `n_modes=(8,8)`, `(12,12)`, `(16,16)`  
-   - Que remarquez-vous?
-
-3) **Capacité** : `hidden_channels=8, 16, 32`  
-   - Que remarquez-vous?
-
-4) (Option GPU) **TFNO vs FNO** : mettre `factorization=None` et comparer.
-
-### Questions d’interprétation (réponses courtes)
-1. Sur quels aspects U‑Net et (T)FNO se trompent-ils “différemment” (lissage, artefacts, biais global…) ?
+### Questions d'interprétation
+1. Sur quels aspects U-Net et (T)FNO se trompent-ils "différemment" ?
 2. Pourquoi `n_modes` contrôle fortement le niveau de détail ?
-3. Que signifie “zero-shot super-resolution” dans ce contexte ? Est-ce vraiment une “super‑résolution” au sens image ?
+3. Que signifie "zero-shot super-resolution" dans ce contexte ?
 
 ### Bonus
 Calculez et comparez $\|\mathbf{v}\|$ avec $\mathbf{v}=-a\nabla u$ pour la vérité et la prédiction $\hat u$.
-C’est un bon test “physique” car le flux dépend des **gradients**.
 
 ---
 
+**ATTENTION - le bug qui invalidait toutes mes ablations.**
+J'avais ecrit :
+
+```python
+config["opt"]["training_loss"] == "l2"     # <- DEUX signes egal !
+```
+
+`==` est un test d'egalite : cette ligne calcule un booleen, ne l'utilise pas,
+et ne modifie **rien**. Tous mes runs "l2" et "h1" utilisaient donc la meme
+loss (celle fixee au depart), et les differences observees n'etaient que du
+bruit d'initialisation.
+
+Et meme avec un seul `=`, cela n'aurait pas suffi : `train_with_trainer` lit la
+variable **globale** `train_loss`, pas le dictionnaire `config`. C'est
+exactement pour cela que la fonction `set_training_loss()` existe plus haut
+dans le notebook. C'est un bon exemple d'un piege classique : une variable
+"config" qui n'est lue qu'a un seul endroit, au moment de l'initialisation.
 """
 
-#loss l2
-config["opt"]["training_loss"] == "l2"
-fno_l2= FNO2d(
-    n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
-    n_layers=config["fno"]["n_layers"],
-    )
-fno_l2 = train_with_trainer(fno_l2, name="fFNO_l2")
-print("FNO test32:", evaluate_quick(fno_l2, test32))
-print("FNO test64:", evaluate_quick(fno_l2, test64))
-
-tfno_l2= TFNO2d(n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
-    n_layers=config["fno"]["n_layers"],
-    )
-tfno_l2 = train_with_trainer(tfno_l2, name="fFNO_l2")
-print("TFNO test32:", evaluate_quick(tfno_l2, test32))
-print("TFNO test64:", evaluate_quick(tfno_l2, test64))
-
-#loss h1
-config["opt"]["training_loss"] == "h1"
-fno_h1= FNO2d(
-    n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
-    n_layers=config["fno"]["n_layers"],
-    )
-fno_h1 = train_with_trainer(fno_h1, name="fFNO_h1")
-print("FNO test32:", evaluate_quick(fno_h1, test32))
-print("FNO test64:", evaluate_quick(fno_h1, test64))
-
-tfno_h1=TFNO2d(n_modes=config["fno"]["n_modes"],
-    hidden_channels=config["fno"]["hidden_channels"],
-    in_channels=in_channels,
-    out_channels=1,
-    n_layers=config["fno"]["n_layers"],
-    )
-tfno_h1 = train_with_trainer(tfno_h1, name="fFNO_h1")
-print("TFNO test32:", evaluate_quick(tfno_h1, test32))
-print("TFNO test64:", evaluate_quick(tfno_h1, test64))
-
-config["opt"]["training_loss"] == "l2"
-unet_l2=UNetSmall(
-    in_channels=in_channels,
-    out_channels=1,
-    base=config["unet"]["base_channels"],
-    depth=config["unet"]["depth"],
-)
-unet_l2= train_with_trainer(unet_l2, "U-Net_l2")
-
-config["opt"]["training_loss"] == "h1"
-
-unet_h1=UNetSmall(
-    in_channels=in_channels,
-    out_channels=1,
-    base=config["unet"]["base_channels"],
-    depth=config["unet"]["depth"],
-)
-
-#resumé des loss
-#l2
-print("------------Resultat loss l2---------------")
-print("FNO test32:", evaluate_quick(fno_l2, test32))
-print("FNO test64:", evaluate_quick(fno_l2, test64))
-
-print("TFNO test32:", evaluate_quick(tfno_l2, test32))
-print("TFNO test64:", evaluate_quick(tfno_l2, test64))
-
-print("U-Net test32:", evaluate_quick(unet_l2, test32))
-print("U-Net test64:", evaluate_quick(unet_l2, test64))
-#h1
-print("------------Resultat loss h1---------------")
-print("FNO test32:", evaluate_quick(fno_h1, test32))
-print("FNO test64:", evaluate_quick(fno_h1, test64))
-
-print("TFNO test32:", evaluate_quick(tfno_h1, test32))
-print("TFNO test64:", evaluate_quick(tfno_h1, test64))
-
-print("U-Net test32:", evaluate_quick(unet_h1, test32))
-print("U-Net test64:", evaluate_quick(unet_h1, test64))
+resultats = []
 
 
+def ablation(nom, model, loss_name):
+    """Entraine un modele avec une loss donnee et enregistre les metriques."""
+    set_training_loss(loss_name)            # <- met bien a jour la globale train_loss
+    m = train_with_trainer(model, name=nom)
+    r32 = evaluate_quick(m, test32)
+    r64 = evaluate_quick(m, test64)
+    ligne = dict(modele=nom, loss=loss_name, params=count_params(m),
+                 l2_32=r32["l2"], h1_32=r32["h1"], l2_64=r64["l2"], h1_64=r64["h1"])
+    resultats.append(ligne)
+    print(f"{nom:22s} | loss {loss_name} | test32 L2 {r32['l2']:.4f} H1 {r32['h1']:.4f}"
+          f" | test64 L2 {r64['l2']:.4f} H1 {r64['h1']:.4f}")
+    return m
 
-"""## Bonus: Aller plus loin en mixant dépendance spatiale et temporelle
 
-Dans Darcy Flow, on apprend un opérateur **statique** : $a(x,y)\mapsto u(x,y)$.  
+"""### Ablation 1 : loss L2 vs H1"""
+
+for loss_name in ("l2", "h1"):
+    ablation(f"FNO ({loss_name})", make_fno("fno"), loss_name)
+    ablation(f"TFNO ({loss_name})", make_fno("tfno"), loss_name)
+    ablation(f"U-Net ({loss_name})",
+             UNetSmall(in_channels=in_channels, out_channels=1,
+                       base=config["unet"]["base_channels"],
+                       depth=config["unet"]["depth"]),
+             loss_name)
+
+"""### Ablation 2 : nombre de modes de Fourier"""
+
+set_training_loss("h1")
+modeles_modes = {}
+for m1 in (4, 8, 12, 16, 24):
+    modeles_modes[m1] = ablation(f"FNO modes ({m1},{m1})",
+                                 make_fno("fno", n_modes=(m1, m1)), "h1")
+
+"""### Ablation 3 : capacite (hidden_channels)"""
+
+for hc in (8, 16, 32):
+    ablation(f"FNO hidden {hc}", make_fno("fno", hidden_channels=hc), "h1")
+
+"""### Tableau recapitulatif"""
+
+import pandas as pd
+df = pd.DataFrame(resultats)
+print(df.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+
+# Ecart de generalisation en resolution : combien perd-on en passant a 64x64 ?
+df["degradation_32_64"] = df["l2_64"] / df["l2_32"]
+print("\nRapport L2(64) / L2(32)  (1.0 = aucune degradation) :")
+print(df[["modele", "loss", "degradation_32_64"]].to_string(index=False,
+                                                           float_format=lambda v: f"{v:.2f}"))
+
+plt.figure(figsize=(11, 4))
+plt.subplot(1, 2, 1)
+ms = sorted(modeles_modes.keys())
+l32 = [next(r["l2_32"] for r in resultats if r["modele"] == f"FNO modes ({m},{m})") for m in ms]
+l64 = [next(r["l2_64"] for r in resultats if r["modele"] == f"FNO modes ({m},{m})") for m in ms]
+plt.plot(ms, l32, 'o-', label="test 32x32")
+plt.plot(ms, l64, 's-', label="test 64x64")
+plt.xlabel("nombre de modes gardes"); plt.ylabel("erreur L2 relative")
+plt.title("Effet du nombre de modes"); plt.legend(); plt.grid(alpha=.3)
+
+plt.subplot(1, 2, 2)
+sous = df[df.modele.str.contains("FNO hidden")]
+plt.plot([8, 16, 32], sous["l2_32"], 'o-', label="test 32x32")
+plt.plot([8, 16, 32], sous["l2_64"], 's-', label="test 64x64")
+plt.xlabel("hidden_channels"); plt.ylabel("erreur L2 relative")
+plt.title("Effet de la capacite"); plt.legend(); plt.grid(alpha=.3)
+plt.tight_layout(); plt.show()
+
+r"""### Reponses aux questions d'interpretation
+
+**1. U-Net et FNO se trompent-ils differemment ?**
+
+Oui, et de facon tres caracteristique.
+
+- Le **FNO** tronque les hautes frequences par construction : au-dela du mode
+  `n_modes`, l'information est purement et simplement supprimee. Ses erreurs
+  sont donc du **lissage** : les fronts raides et les discontinuites de
+  permeabilite sont arrondis. L'erreur est repartie de facon assez uniforme sur
+  le domaine, et ressemble a un residu basse frequence.
+- L'**U-Net**, lui, est local. Il reproduit bien les details fins la ou il a vu
+  des configurations similaires, mais peut se tromper sur le **niveau global**
+  du champ (un biais constant sur une region entiere), parce qu'aucun mecanisme
+  ne lui garantit une coherence a longue distance. Ses erreurs sont plus
+  "par plaques", parfois avec des artefacts en damier aux bords des blocs
+  d'upsampling (`ConvTranspose2d`).
+
+En changeant de resolution, l'U-Net produit en plus des artefacts francs,
+puisque ses filtres ne correspondent plus a la meme echelle physique.
+
+**2. Pourquoi `n_modes` controle-t-il le niveau de detail ?**
+
+Parce que c'est litteralement une **troncature spectrale**. La couche de Fourier
+calcule la FFT, ne garde que les `n_modes` premiers coefficients, leur applique
+une transformation lineaire apprise, puis fait la FFT inverse. Tout ce qui est
+au-dela de `n_modes` est mis a zero : le modele est **structurellement
+incapable** de produire des variations plus fines que la longueur d'onde
+correspondante.
+
+C'est le theoreme d'echantillonnage vu sous un autre angle : garder $m$ modes
+revient a limiter la resolution effective a environ $2m$ points par dimension.
+D'ou le comportement observe : trop peu de modes -> sortie floue ; beaucoup de
+modes -> plus de details, mais un cout en $O(m^2)$ en parametres et un risque
+de surapprentissage sur les hautes frequences, souvent bruitees.
+
+**3. "Zero-shot super-resolution" : est-ce vraiment de la super-resolution ?**
+
+Non, pas au sens du traitement d'image, et c'est un abus de langage important a
+relever.
+
+En imagerie, la super-resolution consiste a **inventer** de l'information
+absente d'une image basse resolution. Ici, ce n'est pas ce qui se passe : on
+recoit une **entree** $a$ deja echantillonnee en 64x64 (donc plus riche), et on
+demande au modele de produire la sortie sur cette meme grille fine. On
+n'invente rien - on evalue un operateur appris sur une discretisation plus fine
+des memes fonctions.
+
+La formulation correcte est **invariance a la discretisation** : le FNO
+approxime un operateur $\mathcal{G}: a(\cdot) \mapsto u(\cdot)$ entre espaces de
+fonctions, et la grille n'est qu'un moyen de representer ces fonctions. C'est
+d'ailleurs pour cela que ca marche : l'operateur appris ne depend pas de la
+grille, donc changer de grille est licite.
+
+### Bonus : verification "physique" via le flux
+
+Le flux $\mathbf{v} = -a\nabla u$ depend des **gradients** de $u$. C'est donc un
+test bien plus severe qu'une erreur sur $u$ : deux champs peuvent etre proches
+en norme $L^2$ et avoir des gradients tres differents. C'est exactement ce que
+la loss $H^1$ cherche a controler.
+"""
+
+@torch.no_grad()
+def comparer_flux(model, loader, idx=1):
+    """Compare le flux v = -a grad(u) entre verite et prediction."""
+    model.eval()
+    batch = next(iter(loader))
+    if isinstance(batch, (list, tuple)):
+        xb, yb = batch
+    else:
+        xb, yb = batch["x"], batch["y"]
+    xb, yb = xb.to(device), yb.to(device)
+    pred = model(xb)
+
+    a = xb[idx, 0].cpu()
+    u = yb[idx, 0].cpu()
+    uh = pred[idx, 0].cpu()
+
+    def flux(u_field, a_field):
+        H, W = u_field.shape
+        dx, dy = 1.0 / (H - 1), 1.0 / (W - 1)
+        du_dx = (u_field[2:, 1:-1] - u_field[:-2, 1:-1]) / (2 * dx)
+        du_dy = (u_field[1:-1, 2:] - u_field[1:-1, :-2]) / (2 * dy)
+        ac = a_field[1:-1, 1:-1]
+        vx, vy = -ac * du_dx, -ac * du_dy
+        return torch.sqrt(vx ** 2 + vy ** 2)
+
+    v_vrai, v_pred = flux(u, a), flux(uh, a)
+    err_u = (uh - u).norm() / u.norm()
+    err_v = (v_pred - v_vrai).norm() / v_vrai.norm()
+
+    fig, axs = plt.subplots(1, 4, figsize=(15, 3.2))
+    for ax, (img, t) in zip(axs, [(u, "u vrai"), (uh, "u predit"),
+                                  (v_vrai, "|v| vrai"), (v_pred, "|v| predit")]):
+        im = ax.imshow(img, origin="lower"); ax.set_title(t)
+        plt.colorbar(im, ax=ax, fraction=.046)
+    plt.suptitle(f"erreur relative sur u : {err_u:.4f}   |   sur le flux |v| : {err_v:.4f}")
+    plt.tight_layout(); plt.show()
+    return err_u.item(), err_v.item()
+
+
+print("=== FNO entraine en L2 ===")
+set_training_loss("l2")
+fno_l2 = train_with_trainer(make_fno("fno"), name="FNO l2")
+eu_l2, ev_l2 = comparer_flux(fno_l2, test32)
+
+print("=== FNO entraine en H1 ===")
+set_training_loss("h1")
+fno_h1 = train_with_trainer(make_fno("fno"), name="FNO h1")
+eu_h1, ev_h1 = comparer_flux(fno_h1, test32)
+
+print(f"\n{'entrainement':16s} {'erreur sur u':>14s} {'erreur sur le flux':>20s}")
+print(f"{'loss L2':16s} {eu_l2:14.4f} {ev_l2:20.4f}")
+print(f"{'loss H1':16s} {eu_h1:14.4f} {ev_h1:20.4f}")
+
+r"""**C'est la justification de la loss $H^1$.** Entrainer en $L^2$ donne une
+erreur legerement plus faible... **sur $u$**, ce qui est logique puisque c'est
+exactement ce qu'on a optimise. Mais sur le **flux** - la quantite qui a un sens
+physique, celle qu'un ingenieur va reellement utiliser - le modele entraine en
+$H^1$ est meilleur.
+
+Lecon generale : **la loss encode ce qui compte pour vous.** Optimiser une
+metrique commode n'est pas la meme chose qu'optimiser la bonne. C'est le meme
+raisonnement qui menait, au TP RNN, a preferer un entrainement multi-pas quand
+l'objectif reel est la prevision long terme.
+
+## Bonus: Aller plus loin en mixant dépendance spatiale et temporelle
+
+Dans Darcy Flow, on apprend un opérateur **statique** : $a(x,y)\mapsto u(x,y)$.
 Mais beaucoup de systèmes physiques sont **spatio-temporels** : on observe un champ $u_t(x,y)$ qui évolue dans le temps.
 
-Un exemple classique est **Navier–Stokes 2D** (écoulement incompressible), où l’état du fluide (souvent la vorticité ou la vitesse) suit une dynamique :
+Un exemple classique est **Navier–Stokes 2D** (écoulement incompressible), où l'état du fluide (souvent la vorticité ou la vitesse) suit une dynamique :
 $$
 u_{t+1} = \mathcal{F}(u_t)
 $$
@@ -904,15 +1046,13 @@ Si un modèle prédit $u_{t+1}$ à partir de $u_t$, on peut faire un **rollout a
 $$
 \hat u_{t+1}=\mathcal{F}(\hat u_t),\ \hat u_{t+2}=\mathcal{F}(\hat u_{t+1}),\dots
 $$
-Comme pour les RNN, les erreurs peuvent **s’accumuler** au fil du temps (drift).
+Comme pour les RNN, les erreurs peuvent **s'accumuler** au fil du temps (drift).
 
 ### Objectif du bonus
 - Charger un petit dataset Navier–Stokes
 - Récupérer une séquence $u_0,\dots,u_T$
 - Faire un rollout autoregressif
-- Tracer l’erreur en fonction du temps
-
-Ci-dessous une commande pour importer les données de Navier–Stokes (NeuralOperator).
+- Tracer l'erreur en fonction du temps
 """
 
 from neuralop.data.datasets import NavierStokesDataset
@@ -920,7 +1060,157 @@ from neuralop.data.datasets import NavierStokesDataset
 """### Bonus : Rollout temporel sur Navier-Stokes 2D
 
 Nous utilisons un dataset de vorticité. Le modèle prend la frame à l'instant $t$ et prédit l'instant $t+1$. En mode test, on réinjecte la prédiction pour prédire $t+2$, et ainsi de suite.
+
+C'est **exactement** le probleme du TP meteo, transpose en 2D spatial. Le
+modele est entraine en "teacher forcing" (une seule etape, avec la vraie
+frame en entree) mais utilise en boucle fermee. Les memes remedes s'appliquent :
+entrainement multi-pas, ou scheduled sampling.
 """
 
+def charger_navier_stokes(n_train=200, n_test=20, resolution=64, T=20):
+    """Charge un jeu Navier-Stokes et le met en forme (N, T, H, W).
+
+    L'API de NeuralOperator change souvent entre versions ; on encapsule le
+    chargement pour n'avoir a corriger qu'a un seul endroit.
+    """
+    ds = NavierStokesDataset(
+        root_dir="./data", n_train=n_train, n_tests=[n_test],
+        batch_size=8, test_batch_sizes=[8],
+        train_resolution=resolution, test_resolutions=[resolution],
+    )
+    return ds
 
 
+def entrainer_pas_de_temps(model, sequences, n_epochs=20, lr=1e-3, bsz=8):
+    """Entraine un FNO a predire u_{t+1} a partir de u_t.
+
+    sequences : tenseur (N, T, H, W) de trajectoires.
+    On fabrique des paires (u_t, u_{t+1}) en aplatissant les dimensions N et T.
+    """
+    N, T, H, W = sequences.shape
+    X = sequences[:, :-1].reshape(-1, 1, H, W)     # toutes les frames sauf la derniere
+    Y = sequences[:, 1:].reshape(-1, 1, H, W)      # decalees d'un pas
+    X, Y = X.to(device), Y.to(device)
+
+    model = model.to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    crit = LpLoss(d=2, p=2)
+
+    for epoch in range(n_epochs):
+        model.train()
+        perm = torch.randperm(len(X), device=device)
+        tot = 0.0
+        for k in range(0, len(X), bsz):
+            idx = perm[k:k + bsz]
+            loss = crit(model(X[idx]), Y[idx])
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += loss.item() * len(idx)
+        if epoch % max(1, n_epochs // 5) == 0:
+            print(f"epoch {epoch:3d} | loss {tot/len(X):.5f}")
+    return model
+
+
+@torch.no_grad()
+def rollout(model, u0, n_steps):
+    """Rollout autoregressif : on part de u0 et on itere le modele sur lui-meme."""
+    model.eval()
+    u = u0.to(device)
+    trajectoire = []
+    for _ in range(n_steps):
+        u = model(u)                # la sortie devient l'entree suivante
+        trajectoire.append(u.cpu())
+    return torch.cat(trajectoire, dim=0)
+
+
+"""### Execution du bonus
+
+Le telechargement du dataset Navier-Stokes est lourd (~1 Go) et l'entrainement
+demande un GPU. On protege donc l'execution.
+"""
+
+FAIRE_LE_BONUS = torch.cuda.is_available()
+
+if FAIRE_LE_BONUS:
+    try:
+        ns = charger_navier_stokes()
+        # Mise en forme : on recupere un tenseur (N, T, H, W) de trajectoires.
+        # Le nom exact des attributs depend de la version de neuraloperator ;
+        # on inspecte le premier batch pour s'adapter.
+        batch = next(iter(ns.train_db)) if hasattr(ns, "train_db") else None
+        print("structure du dataset :", type(batch), getattr(batch, "keys", lambda: None)())
+
+        # A adapter selon la sortie ci-dessus : on suppose ici des trajectoires
+        # stockees dans un tenseur de shape (N, T, H, W).
+        sequences = ns.train_db.data if hasattr(ns.train_db, "data") else None
+
+        if sequences is not None and sequences.ndim == 4:
+            model_ns = FNO2d(n_modes=(16, 16), hidden_channels=32,
+                             in_channels=1, out_channels=1, n_layers=4)
+            model_ns = entrainer_pas_de_temps(model_ns, sequences[:180], n_epochs=20)
+
+            # Rollout sur une trajectoire de test
+            traj_vraie = sequences[-1]                       # (T, H, W)
+            u0 = traj_vraie[0:1].unsqueeze(1)                # (1, 1, H, W)
+            n_steps = traj_vraie.shape[0] - 1
+            traj_pred = rollout(model_ns, u0, n_steps)[:, 0] # (n_steps, H, W)
+
+            # Erreur en fonction du temps
+            erreurs = [((traj_pred[t] - traj_vraie[t + 1]).norm()
+                        / traj_vraie[t + 1].norm()).item() for t in range(n_steps)]
+
+            plt.figure(figsize=(7, 4))
+            plt.plot(range(1, n_steps + 1), erreurs, 'o-')
+            plt.xlabel("pas de temps"); plt.ylabel("erreur L2 relative")
+            plt.title("Accumulation de l'erreur en rollout autoregressif")
+            plt.grid(alpha=.3); plt.show()
+
+            # Visualisation de la derive
+            pas = [0, n_steps // 3, 2 * n_steps // 3, n_steps - 1]
+            fig, axs = plt.subplots(2, len(pas), figsize=(3.5 * len(pas), 7))
+            for j, t in enumerate(pas):
+                axs[0, j].imshow(traj_vraie[t + 1], origin="lower")
+                axs[0, j].set_title(f"verite, t = {t+1}")
+                axs[1, j].imshow(traj_pred[t], origin="lower")
+                axs[1, j].set_title(f"predit, t = {t+1} (err {erreurs[t]:.3f})")
+                for a in (axs[0, j], axs[1, j]): a.axis('off')
+            plt.suptitle("Derive progressive du rollout")
+            plt.tight_layout(); plt.show()
+        else:
+            print("Format de dataset inattendu : adapter l'extraction des trajectoires.")
+    except Exception as e:
+        print("Bonus non execute :", repr(e))
+else:
+    print("Bonus Navier-Stokes ignore (pas de GPU).")
+    print("Comportement attendu : l'erreur croit d'abord lentement puis")
+    print("explose - la meme accumulation d'erreurs qu'au TP RNN meteo.")
+
+r"""## Conclusion du TP
+
+| | U-Net (CNN) | FNO |
+|---|---|---|
+| Objet appris | application grille -> grille | operateur fonction -> fonction |
+| Localite | filtres locaux (3x3) | global par nature (la FFT melange tout le domaine) |
+| Changement de resolution | il faut reentrainer | fonctionne tel quel |
+| Cout d'une couche | $O(N)$ en pixels | $O(N \log N)$ (FFT) |
+| Limite | champ receptif fini | troncature des hautes frequences |
+
+### Le fil rouge de tout le cours
+
+Ce TP boucle la boucle sur quelque chose qui traverse les six precedents : **le
+bon modele est celui dont la structure encode les bonnes invariances du
+probleme.**
+
+| Structure du probleme | Architecture adaptee | Invariance encodee |
+|---|---|---|
+| Aucune (vecteurs quelconques) | MLP | aucune |
+| Voisinage local, motifs repetes | CNN | translation |
+| Sequence, ordre temporel | RNN / GRU / LSTM | translation dans le temps |
+| Relations a longue portee, ordre souple | Transformer | permutation (+ positions ajoutees) |
+| Fonction sur un domaine continu | FNO | **discretisation** |
+
+Un MLP suffisamment gros pourrait en theorie tout apprendre (theoreme
+d'approximation universelle). En pratique il faudrait des quantites de donnees
+astronomiques, parce qu'il devrait *deduire* de ces donnees des structures que
+les autres architectures lui donnent **gratuitement**. Choisir une architecture,
+c'est choisir ce qu'on n'aura pas besoin d'apprendre.
+"""

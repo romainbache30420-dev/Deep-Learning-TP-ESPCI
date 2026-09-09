@@ -123,7 +123,7 @@ for t in range(inputs.shape[1]):
     out, hn = recNN(inputs[0,t].view(1,1,-1), hn)
     print("at time ",t, " out = ", out)
 
-"""# Usage of GRU and LSTM
+r"""# Usage of GRU and LSTM
 
 ## GRU (Gated Recurrent Unit)
 
@@ -304,11 +304,24 @@ The dataset comes from this [open data site](https://public.opendatasoft.com/exp
 
 """
 
-from google.colab import drive
-drive.mount('/content/drive')
+import os
 
-train = np.load("/content/drive/MyDrive/meteo-train.py.npy",allow_pickle=True)
-test  = np.load("/content/drive/MyDrive/meteo-test.py.npy",allow_pickle=True)
+# Sur Colab, les fichiers sont sur le Drive ; en local, on les cherche a cote
+# du notebook. Le try/except evite d'avoir a modifier le code selon l'endroit
+# ou on execute.
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    base = "/content/drive/MyDrive"
+except ImportError:
+    base = "."
+
+train = np.load(os.path.join(base, "meteo-train.py.npy"), allow_pickle=True)
+test  = np.load(os.path.join(base, "meteo-test.py.npy"),  allow_pickle=True)
+
+FEATURES = ["pression_mer", "var_pression_3h", "direction_vent",
+            "vitesse_vent", "temperature", "point_rosee", "humidite"]
+print("train :", train.shape, "| test :", test.shape)
 
 """---
 
@@ -425,29 +438,85 @@ The class inherits from an existing class of pytorch : Module. This means that y
 class GRUPredictor(nn.Module):
     """GRUPredictor is a recurrent model. It takes as input a vector and predict
     the next one given past observations."""
-    def __init__(self, input_dim=7, hidden_dim=50, nstack = 1, dropout=0):
+
+    def __init__(self, input_dim=7, hidden_dim=50, nstack=1, dropout=0.0):
         super(GRUPredictor, self).__init__()
         self.idim = input_dim
-        self.hdim= hidden_dim
+        self.hdim = hidden_dim
         self.nstack = nstack
-        self.dropout=dropout
-        self.gru=nn.GRU(input_size=self.idim, hidden_size=self.hdim, num_layers=self.nstack, batch_first=True, dropout=self.dropout if self.nstack > 1 else 0)
+        self.dropout = dropout
+        self.gru = nn.GRU(input_size=self.idim, hidden_size=self.hdim,
+                          num_layers=self.nstack, batch_first=True,
+                          # le dropout de nn.GRU s'applique ENTRE les couches
+                          # empilees : il n'a aucun effet si nstack == 1,
+                          # et PyTorch emet un warning si on le laisse.
+                          dropout=self.dropout if self.nstack > 1 else 0)
         self.out = nn.Linear(self.hdim, self.idim)
-    def init_hidden(self, bsz,inputs):
-        # This function is given: understand it.
-        self.h = th.zeros(self.nstack, bsz, self.hdim,device=inputs.device,dtype=input.dtype)
+
+    def init_hidden(self, bsz, inputs):
+        """Etat cache initial, a zero.
+
+        Shape imposee par PyTorch : (num_layers, batch, hidden_dim).
+        Attention, ce n'est PAS batch_first, meme quand batch_first=True :
+        l'option ne concerne que le tenseur d'entree, pas l'etat cache.
+
+        Correction par rapport a ma version initiale : c'etait `input.dtype`
+        (la fonction native `input` de Python !) au lieu de `inputs.dtype`.
+        L'erreur passait inapercue parce que forward() recreait h0 juste apres.
+        """
+        return th.zeros(self.nstack, bsz, self.hdim,
+                        device=inputs.device, dtype=inputs.dtype)
 
     def forward(self, x, h0=None):
+        """x : (B, L, input_dim) -> (predictions (B, L, input_dim), hn)"""
         if h0 is None:
-            bsz=x.shape[0]
-            self.init_hidden(bsz,x)
-            h0=self.h
-            h0=th.zeros(self.nstack,bsz,self.hdim,device=x.device,dtype=x.dtype)
-        gru_out, hn = self.gru(x, h0)
-        out = self.out(gru_out)
+            h0 = self.init_hidden(x.shape[0], x)
+        gru_out, hn = self.gru(x, h0)      # gru_out : (B, L, hidden_dim)
+        # La couche lineaire est appliquee a CHAQUE pas de temps : PyTorch
+        # broadcast automatiquement nn.Linear sur les dimensions de gauche.
+        out = self.out(gru_out)            # (B, L, input_dim)
         return out, hn
 
+    @th.no_grad()
+    def generate(self, seed, n_steps):
+        """Prediction long terme en boucle fermee (rollout autoregressif).
+
+        Le modele "lit" d'abord la sequence `seed` (les vraies observations)
+        pour construire son etat cache, puis genere `n_steps` valeurs en
+        REINJECTANT ses propres predictions en entree.
+
+        C'est la difference fondamentale avec l'entrainement, ou le modele
+        recoit toujours la vraie valeur precedente (on parle de *teacher
+        forcing*). En generation il n'a plus ce filet, et ses erreurs
+        s'accumulent : c'est l'*exposure bias*.
+
+        Args:
+            seed    : (B, L_seed, D) vraies observations
+            n_steps : nombre de pas a generer
+        Returns:
+            (B, n_steps, D)
+        """
+        self.eval()
+        # 1) phase de "lecture" : on avale la sequence connue
+        out, h = self.forward(seed)
+        # la derniere sortie est deja la prediction du premier pas a generer
+        x = out[:, -1:, :]
+        preds = [x]
+        # 2) phase de generation en boucle fermee
+        for _ in range(n_steps - 1):
+            x, h = self.forward(x, h)      # on repart de l'etat cache courant
+            preds.append(x)
+        return th.cat(preds, dim=1)
+
+
 # A simple test of the model on a mini-batch
+model_test = GRUPredictor(input_dim=7, hidden_dim=10)
+xb = Xtrain_reshaped[:4]
+out_test, hn_test = model_test(xb)
+print("entree      :", xb.shape)
+print("predictions :", out_test.shape)
+print("etat cache  :", hn_test.shape, " <- (nstack, batch, hidden)")
+print("generation  :", model_test.generate(xb, 15).shape)
 
 """# A first forecasting model: training and evaluation
 
@@ -463,52 +532,91 @@ Now we have everything. It is time to build a model and to train it:
 
 from torch.utils.data import TensorDataset, DataLoader
 
-data = Xtrain_norm
-X_train, Y_train = make_sequences(data, 10)
-X_train_tensor = th.tensor(X_train, dtype=th.float32)
-Y_train_tensor = th.tensor(Y_train, dtype=th.float32)
-bsz=100
-dataset = TensorDataset(X_train_tensor, Y_train_tensor)
-dataloader = DataLoader(dataset, batch_size=bsz, shuffle=True, drop_last=True)
+ls = 16
+Xtr_seq, Ytr_seq = make_sequences(Xtrain_norm, ls)
+Xte_seq, Yte_seq = make_sequences(Xtest_norm, ls)
+print("train :", Xtr_seq.shape, "| test :", Xte_seq.shape)
+
+device = th.device("cuda" if th.cuda.is_available() else "cpu")
+print("device :", device)
 
 
-model = GRUPredictor(input_dim=7, hidden_dim=50, nstack=1)
-Loss = nn.MSELoss()
-learning_rate = 0.001
-optimizer = th.optim.Adam(model.parameters(), lr=learning_rate)
+def train_gru(model, Xtr, Ytr, Xte, Yte, num_epochs=50, lr=1e-3, bsz=100,
+              verbose=True, clip=1.0):
+    """Entraine un modele recurrent a predire le pas de temps suivant.
 
-num_epochs = 50
-losses = []
+    Note sur le gradient clipping : les reseaux recurrents sont sujets a
+    l'*exploding gradient* (le gradient est multiplie par la meme matrice a
+    chaque pas de la retropropagation dans le temps, donc il peut croitre
+    exponentiellement avec la longueur de la sequence). Borner la norme du
+    gradient est la parade standard, et ne coute rien.
+    """
+    model = model.to(device)
+    Xtr, Ytr = Xtr.to(device), Ytr.to(device)
+    Xte, Yte = Xte.to(device), Yte.to(device)
+
+    loader = DataLoader(TensorDataset(Xtr, Ytr), batch_size=bsz,
+                        shuffle=True, drop_last=True)
+    criterion = nn.MSELoss()
+    optimizer = th.optim.Adam(model.parameters(), lr=lr)
+
+    hist = {'train': [], 'test': []}
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss, nb = 0.0, 0
+        for Xb, Yb in loader:
+            predictions, _ = model(Xb)
+            loss = criterion(predictions, Yb)
+            optimizer.zero_grad()
+            loss.backward()
+            th.nn.utils.clip_grad_norm_(model.parameters(), clip)
+            optimizer.step()
+            epoch_loss += loss.item(); nb += 1
+        hist['train'].append(epoch_loss / nb)
+
+        model.eval()
+        with th.no_grad():
+            pred_te, _ = model(Xte)
+            hist['test'].append(criterion(pred_te, Yte).item())
+
+        if verbose and (epoch % max(1, num_epochs // 10) == 0 or epoch == num_epochs - 1):
+            print(f"epoch {epoch:4d} | train MSE {hist['train'][-1]:.5f}"
+                  f" | test MSE {hist['test'][-1]:.5f}")
+    return hist
 
 
-for epoch in range(num_epochs):
-    epoch_loss = 0.0
-    model.train()
+th.manual_seed(0)
+model = GRUPredictor(input_dim=7, hidden_dim=10, nstack=1)
+hist = train_gru(model, Xtr_seq, Ytr_seq, Xte_seq, Yte_seq, num_epochs=50, lr=1e-3)
 
-    for X,Y in dataloader:
-        optimizer.zero_grad()
-        predictions, _ = model(X)
-        loss = Loss(predictions, Y)
-        loss.backward()
-        optimizer.step()
-        epoch_loss += loss.item()
-    avg_loss = epoch_loss / len(dataloader)
-    losses.append(avg_loss)
+plt.figure(figsize=(7, 4))
+plt.plot(hist['train'], label='train')
+plt.plot(hist['test'], label='test')
+plt.title("Courbe d'apprentissage du GRU (H = 10)")
+plt.xlabel("epoch"); plt.ylabel("Loss (MSE)")
+plt.legend(); plt.grid(True); plt.show()
 
-    model.eval()
-    with th.no_grad():
-        X_test, Y_test = make_sequences(Xtest_norm
+"""### Une baseline indispensable : la persistance
 
+Avant de se rejouir d'une MSE de 0.05, il faut la comparer a quelque chose.
+La baseline evidente en meteo est la **persistance** : "demain = aujourd'hui".
+Elle est etonnamment difficile a battre a court terme, et tout modele qui ne la
+bat pas ne sert a rien.
+"""
 
-# Affichage de la courbe d'apprentissage
-plt.figure(figsize=(10, 5))
-plt.plot(losses, label='Training Loss', color='blue', linewidth=2)
-plt.title('Courbe d\'apprentissage du GRU')
-plt.xlabel('Époques')
-plt.ylabel('Loss (MSE)')
-plt.legend()
-plt.grid(True)
-plt.show()
+criterion = nn.MSELoss()
+with th.no_grad():
+    # persistance : on predit x_t pour l'instant t+1
+    mse_persistance = criterion(Xte_seq, Yte_seq).item()
+    # moyenne climatologique : on predit toujours 0 (les donnees sont centrees)
+    mse_moyenne = criterion(th.zeros_like(Yte_seq), Yte_seq).item()
+    pred_te, _ = model(Xte_seq.to(device))
+    mse_gru = criterion(pred_te.cpu(), Yte_seq).item()
+
+print(f"MSE moyenne climatologique : {mse_moyenne:.5f}")
+print(f"MSE persistance            : {mse_persistance:.5f}")
+print(f"MSE GRU                    : {mse_gru:.5f}")
+print(f"\ngain du GRU sur la persistance : {100*(1-mse_gru/mse_persistance):.1f} %")
 
 """## Forecasting evaluation
 Now you have a trained model, you can use it for forecasting. The first evaluation relies on the same conditions as the training: predict the 7 values for the day after given the true values observed for the current day.
@@ -523,8 +631,57 @@ Now you have a trained model, you can use it for forecasting. The first evaluati
 """
 
 # TODO
+@th.no_grad()
+def mse_par_variable(model, X, Y):
+    """MSE detaillee variable par variable : certaines sont bien plus
+    previsibles que d'autres."""
+    model.eval()
+    pred, _ = model(X.to(device))
+    err = ((pred.cpu() - Y) ** 2).mean(dim=(0, 1))    # moyenne sur batch et temps
+    return err
 
-"""## Long term forecasting
+
+err = mse_par_variable(model, Xte_seq, Yte_seq)
+print("MSE par variable (donnees normalisees, plus c'est bas mieux c'est) :")
+for nom, e in zip(FEATURES, err):
+    print(f"  {nom:18s} : {e.item():.4f}")
+
+# Prediction sur 100 pas de temps consecutifs.
+# Les mesures sont faites toutes les 3 h, donc 100 pas ~ 12 jours.
+@th.no_grad()
+def plot_predictions_1pas(model, X_norm, n_pas=100, debut=0, variables=(4, 0, 6)):
+    """Prediction "un pas en avant" sur une portion continue de la serie.
+
+    Le modele recoit a chaque instant la VRAIE valeur precedente : c'est le
+    regime le plus favorable, celui de l'entrainement.
+    """
+    model.eval()
+    seq = X_norm[debut:debut + n_pas + 1].unsqueeze(0).to(device)   # (1, T+1, D)
+    pred, _ = model(seq[:, :-1, :])
+    pred = pred[0].cpu()
+    vrai = seq[0, 1:, :].cpu()
+
+    fig, axs = plt.subplots(len(variables), 1, figsize=(12, 3 * len(variables)), sharex=True)
+    for ax, v in zip(np.atleast_1d(axs), variables):
+        ax.plot(vrai[:, v], 'k-', lw=1.5, label='observe')
+        ax.plot(pred[:, v], 'r--', lw=1.5, label='predit (1 pas)')
+        ax.set_ylabel(FEATURES[v]); ax.grid(alpha=.3); ax.legend(fontsize=8)
+    plt.xlabel("pas de temps (1 pas = 3 h)")
+    plt.suptitle("Prevision a un pas de temps")
+    plt.tight_layout(); plt.show()
+
+
+plot_predictions_1pas(model, Xtest_norm, n_pas=100)
+
+"""A un pas de temps la prediction colle tres bien. Mais attention a
+l'interpretation : une bonne partie de cette performance vient simplement du
+fait que la meteo varie peu en 3 heures. Le modele a surtout appris a
+recopier l'entree en la corrigeant legerement - d'ou l'importance de la
+comparaison avec la persistance faite plus haut.
+
+Le vrai test, c'est la prediction a plus long terme.
+
+## Long term forecasting
 
 We can also evaluate long term predictions: let the model "reads" N=15 true values, and then generate the N following values. For this last generation step the model uses its own predictions as new input.
 
@@ -538,9 +695,95 @@ We can also evaluate long term predictions: let the model "reads" N=15 true valu
 - [ ] to have a better evaluation, we can rescale the values.
 """
 
+# La methode generate() a ete ajoutee a la classe GRUPredictor plus haut.
+
+mean_t = th.FloatTensor(mean)     # pour revenir aux unites physiques
+std_t = th.FloatTensor(std)
 
 
-"""# Stronger models
+def denormalise(x):
+    """Repasse des donnees centrees-reduites aux unites physiques reelles."""
+    return x * std_t + mean_t
+
+
+@th.no_grad()
+def evaluer_long_terme(model, X_norm, n_seed=15, n_gen=15, debut=0,
+                       variables=(4, 0, 6), plot=True):
+    """Compare, en unites physiques : verite, prediction 1 pas, generation."""
+    model.eval()
+    seed = X_norm[debut:debut + n_seed].unsqueeze(0).to(device)
+    vrai = X_norm[debut + n_seed:debut + n_seed + n_gen]
+
+    # a) generation en boucle fermee (le modele se relit lui-meme)
+    gen = model.generate(seed, n_gen)[0].cpu()
+
+    # b) prediction 1 pas (le modele recoit la verite a chaque instant)
+    ctx = X_norm[debut + n_seed - 1:debut + n_seed + n_gen - 1].unsqueeze(0).to(device)
+    un_pas, _ = model(ctx)
+    un_pas = un_pas[0].cpu()
+
+    v_d, g_d, u_d = denormalise(vrai), denormalise(gen), denormalise(un_pas)
+    mse_gen = ((g_d - v_d) ** 2).mean(dim=0)
+    mse_1p = ((u_d - v_d) ** 2).mean(dim=0)
+
+    if plot:
+        fig, axs = plt.subplots(len(variables), 1, figsize=(11, 3 * len(variables)), sharex=True)
+        for ax, v in zip(np.atleast_1d(axs), variables):
+            ax.plot(range(n_gen), v_d[:, v], 'k-o', ms=3, label='verite')
+            ax.plot(range(n_gen), u_d[:, v], 'g--s', ms=3, label='prediction 1 pas')
+            ax.plot(range(n_gen), g_d[:, v], 'r--^', ms=3, label='generation autoregressive')
+            ax.set_ylabel(FEATURES[v]); ax.grid(alpha=.3); ax.legend(fontsize=8)
+        plt.xlabel("pas de temps generes (1 pas = 3 h)")
+        plt.suptitle(f"Apres {n_seed} pas lus, generation de {n_gen} pas")
+        plt.tight_layout(); plt.show()
+
+    return mse_gen, mse_1p
+
+
+mse_gen, mse_1p = evaluer_long_terme(model, Xtest_norm, n_seed=15, n_gen=15, debut=0)
+print("\nRMSE en unites physiques sur les 15 pas generes :")
+print(f"{'variable':20s} {'1 pas':>10s} {'generation':>12s}")
+for nom, a, b in zip(FEATURES, mse_1p, mse_gen):
+    print(f"{nom:20s} {a.sqrt().item():10.3f} {b.sqrt().item():12.3f}")
+
+"""### Comment l'erreur croit avec l'horizon"""
+
+@th.no_grad()
+def erreur_vs_horizon(model, X_norm, n_seed=15, n_gen=24, n_essais=200, var=4):
+    """Erreur moyenne de generation en fonction du nombre de pas d'avance."""
+    model.eval()
+    debuts = np.linspace(0, len(X_norm) - n_seed - n_gen - 1, n_essais).astype(int)
+    erreurs = []
+    for d in debuts:
+        seed = X_norm[d:d + n_seed].unsqueeze(0).to(device)
+        vrai = X_norm[d + n_seed:d + n_seed + n_gen]
+        gen = model.generate(seed, n_gen)[0].cpu()
+        erreurs.append(((denormalise(gen) - denormalise(vrai)) ** 2)[:, var])
+    return th.stack(erreurs).mean(dim=0).sqrt()
+
+
+rmse_h = erreur_vs_horizon(model, Xtest_norm, var=4)
+# persistance : on garde la derniere valeur observee pour tout l'horizon
+plt.figure(figsize=(7, 4))
+plt.plot(np.arange(1, len(rmse_h) + 1) * 3, rmse_h, 'o-', label='GRU (generation)')
+plt.xlabel("horizon de prevision (heures)"); plt.ylabel("RMSE temperature (degres C)")
+plt.title("Degradation de la prevision avec l'horizon")
+plt.grid(alpha=.3); plt.legend(); plt.show()
+
+"""**C'est le resultat central du TP.** L'erreur croit vite avec l'horizon, pour
+deux raisons qu'il faut bien distinguer :
+
+1. **une raison fondamentale** : l'atmosphere est un systeme chaotique, la
+   previsibilite est intrinsequement limitee. Meme un modele parfait finirait
+   par diverger de la realite ;
+2. **une raison liee a notre entrainement** : le modele n'a JAMAIS vu ses
+   propres predictions en entree pendant l'entrainement (teacher forcing). Des
+   qu'on ferme la boucle, il se retrouve face a des entrees legerement
+   "hors distribution", ce qui produit une erreur un peu plus grande, qui
+   produit une entree encore plus hors distribution, etc. C'est l'**exposure
+   bias**, et lui on peut le corriger - c'est l'objet de la derniere section.
+
+# Stronger models
 
 ---
 
@@ -551,9 +794,44 @@ We can also evaluate long term predictions: let the model "reads" N=15 true valu
 
 """
 
+# TODO
+# La classe accepte deja nstack (nombre de couches empilees) et dropout.
+resultats = {}
+configs = [(10, 1), (20, 1), (50, 1), (100, 1), (50, 2), (50, 3)]
 
+for H, nstack in configs:
+    th.manual_seed(0)
+    m = GRUPredictor(input_dim=7, hidden_dim=H, nstack=nstack, dropout=0.1)
+    h = train_gru(m, Xtr_seq, Ytr_seq, Xte_seq, Yte_seq, num_epochs=50,
+                  lr=1e-3, verbose=False)
+    g, u = evaluer_long_terme(m, Xtest_norm, n_seed=15, n_gen=15, plot=False)
+    resultats[(H, nstack)] = dict(model=m, hist=h, mse_1pas=h['test'][-1],
+                                  rmse_gen_T=g[4].sqrt().item())
+    print(f"H = {H:3d}, {nstack} couche(s) | {sum(p.numel() for p in m.parameters()):7d} params"
+          f" | test MSE (1 pas) = {h['test'][-1]:.5f}"
+          f" | RMSE temp. generation = {g[4].sqrt().item():.3f} C")
 
-"""# Improved training
+fig, axs = plt.subplots(1, 2, figsize=(12, 4))
+for (H, ns), r in resultats.items():
+    axs[0].plot(r['hist']['test'], label=f"H={H}, {ns} c.")
+axs[0].set_xlabel("epoch"); axs[0].set_ylabel("MSE test"); axs[0].set_yscale('log')
+axs[0].set_title("Convergence"); axs[0].legend(fontsize=7); axs[0].grid(alpha=.3)
+
+noms = [f"H={H}\n{ns}c" for (H, ns) in resultats]
+axs[1].bar(noms, [r['rmse_gen_T'] for r in resultats.values()])
+axs[1].set_ylabel("RMSE temperature (generation 15 pas)")
+axs[1].set_title("Performance en generation"); axs[1].grid(alpha=.3, axis='y')
+plt.tight_layout(); plt.show()
+
+"""**Observation.** Augmenter H ameliore nettement la prediction a un pas, mais
+le gain en **generation** est bien plus modeste. Empiler des couches n'aide
+quasiment pas ici : avec ~50 000 pas de temps seulement, un modele plus gros
+surapprend avant de mieux generaliser.
+
+Le message : le probleme de la prevision long terme n'est **pas** un probleme
+de capacite. C'est un probleme de **methode d'entrainement**.
+
+# Improved training
 When you try to predict beyond the next day, the performance clearly drop.
 
 ---
@@ -561,3 +839,172 @@ When you try to predict beyond the next day, the performance clearly drop.
 - [ ] propose and implement another training method.
 """
 
+# TODO
+# Trois strategies pour reduire l'ecart entre entrainement et generation.
+
+def train_multistep(model, X_norm, num_epochs=50, lr=1e-3, bsz=100,
+                    n_seed=8, n_gen=8, verbose=True, clip=1.0):
+    """STRATEGIE 1 - entrainement multi-pas (rollout pendant l'entrainement).
+
+    Au lieu de n'apprendre qu'a predire t+1, on demande au modele de generer
+    n_gen pas en boucle fermee, et on retropropage l'erreur a travers TOUTE la
+    generation. Le modele apprend donc a etre robuste a ses propres erreurs :
+    c'est exactement le regime dans lequel on va l'utiliser.
+
+    Cout : plus lent (le graphe de calcul est n_gen fois plus profond) et
+    gradient plus difficile a propager - d'ou l'importance du clipping.
+    """
+    model = model.to(device)
+    L = n_seed + n_gen
+    Xs, _ = make_sequences(X_norm, L)          # sequences de longueur L
+    Xs = Xs.to(device)
+    loader = DataLoader(TensorDataset(Xs), batch_size=bsz, shuffle=True, drop_last=True)
+    criterion = nn.MSELoss()
+    optimizer = th.optim.Adam(model.parameters(), lr=lr)
+
+    hist = []
+    for epoch in range(num_epochs):
+        model.train()
+        tot, nb = 0.0, 0
+        for (batch,) in loader:
+            seed = batch[:, :n_seed, :]
+            cible = batch[:, n_seed:, :]
+
+            # rollout en boucle fermee, mais AVEC le graphe de calcul
+            out, h = model(seed)
+            x = out[:, -1:, :]
+            preds = [x]
+            for _ in range(n_gen - 1):
+                x, h = model(x, h)
+                preds.append(x)
+            pred = th.cat(preds, dim=1)
+
+            loss = criterion(pred, cible)
+            optimizer.zero_grad()
+            loss.backward()
+            th.nn.utils.clip_grad_norm_(model.parameters(), clip)
+            optimizer.step()
+            tot += loss.item(); nb += 1
+        hist.append(tot / nb)
+        if verbose and (epoch % max(1, num_epochs // 10) == 0 or epoch == num_epochs - 1):
+            print(f"epoch {epoch:4d} | loss multi-pas {hist[-1]:.5f}")
+    return hist
+
+
+def train_scheduled_sampling(model, Xtr, Ytr, Xte, Yte, num_epochs=50, lr=1e-3,
+                             bsz=100, verbose=True, clip=1.0):
+    """STRATEGIE 2 - scheduled sampling (Bengio et al., 2015).
+
+    On commence en teacher forcing pur (entree = verite), et on remplace
+    progressivement, avec une probabilite eps croissante, l'entree par la
+    propre prediction du modele. Le modele est ainsi sevre en douceur.
+
+    eps passe lineairement de 0 a 0.5 au fil des epochs.
+    """
+    model = model.to(device)
+    Xtr, Ytr = Xtr.to(device), Ytr.to(device)
+    Xte, Yte = Xte.to(device), Yte.to(device)
+    loader = DataLoader(TensorDataset(Xtr, Ytr), batch_size=bsz, shuffle=True, drop_last=True)
+    criterion = nn.MSELoss()
+    optimizer = th.optim.Adam(model.parameters(), lr=lr)
+
+    hist = {'train': [], 'test': [], 'eps': []}
+    for epoch in range(num_epochs):
+        eps = 0.5 * epoch / max(1, num_epochs - 1)
+        model.train()
+        tot, nb = 0.0, 0
+        for Xb, Yb in loader:
+            B, L, D = Xb.shape
+            h = model.init_hidden(B, Xb)
+            entree = Xb[:, 0:1, :]
+            sorties = []
+            for t in range(L):
+                out, h = model(entree, h)
+                sorties.append(out)
+                if t < L - 1:
+                    # tirage : vraie valeur (teacher forcing) ou propre prediction
+                    masque = (th.rand(B, 1, 1, device=Xb.device) < eps).float()
+                    entree = masque * out.detach() + (1 - masque) * Xb[:, t+1:t+2, :]
+            pred = th.cat(sorties, dim=1)
+            loss = criterion(pred, Yb)
+            optimizer.zero_grad()
+            loss.backward()
+            th.nn.utils.clip_grad_norm_(model.parameters(), clip)
+            optimizer.step()
+            tot += loss.item(); nb += 1
+
+        hist['train'].append(tot / nb); hist['eps'].append(eps)
+        model.eval()
+        with th.no_grad():
+            p, _ = model(Xte)
+            hist['test'].append(criterion(p, Yte).item())
+        if verbose and (epoch % max(1, num_epochs // 10) == 0 or epoch == num_epochs - 1):
+            print(f"epoch {epoch:4d} | eps {eps:.2f} | train {hist['train'][-1]:.5f}"
+                  f" | test {hist['test'][-1]:.5f}")
+    return hist
+
+
+"""### Comparaison des trois methodes d'entrainement"""
+
+th.manual_seed(0)
+m_base = GRUPredictor(7, 50, 1)
+train_gru(m_base, Xtr_seq, Ytr_seq, Xte_seq, Yte_seq, num_epochs=50, verbose=False)
+
+th.manual_seed(0)
+m_multi = GRUPredictor(7, 50, 1)
+train_multistep(m_multi, Xtrain_norm, num_epochs=50, n_seed=8, n_gen=8, verbose=False)
+
+th.manual_seed(0)
+m_sched = GRUPredictor(7, 50, 1)
+train_scheduled_sampling(m_sched, Xtr_seq, Ytr_seq, Xte_seq, Yte_seq,
+                         num_epochs=50, verbose=False)
+
+modeles = {"teacher forcing": m_base, "multi-pas": m_multi, "scheduled sampling": m_sched}
+
+plt.figure(figsize=(7, 4))
+print(f"{'methode':22s} {'RMSE 1 pas':>12s} {'RMSE 15 pas':>13s}")
+for nom, m in modeles.items():
+    g, u = evaluer_long_terme(m, Xtest_norm, n_seed=15, n_gen=15, plot=False)
+    rmse_h = erreur_vs_horizon(m, Xtest_norm, n_gen=24, var=4)
+    plt.plot(np.arange(1, 25) * 3, rmse_h, 'o-', ms=3, label=nom)
+    print(f"{nom:22s} {u[4].sqrt().item():12.3f} {g[4].sqrt().item():13.3f}")
+plt.xlabel("horizon (heures)"); plt.ylabel("RMSE temperature (degres C)")
+plt.title("Effet de la methode d'entrainement sur la prevision long terme")
+plt.legend(); plt.grid(alpha=.3); plt.show()
+
+r"""### Conclusion du TP
+
+| Methode | 1 pas | Long terme | Cout |
+|---|---|---|---|
+| Teacher forcing | le meilleur | se degrade vite | le moins cher |
+| Multi-pas (rollout) | legerement moins bon | nettement meilleur | ~n_gen fois plus lent |
+| Scheduled sampling | comparable | meilleur | intermediaire |
+
+Le compromis est net : le teacher forcing optimise exactement la mauvaise
+metrique si ce qu'on veut, c'est de la prevision long terme. Il vaut la peine de
+sacrifier un peu de precision a un pas pour gagner beaucoup en robustesse.
+
+**Ce probleme est general et depasse largement la meteo.** On le retrouve
+identiquement dans les modeles de langage (un GPT est entraine en teacher
+forcing et genere en boucle fermee), et dans les simulateurs physiques appris -
+c'est exactement le point souleve dans le bonus Navier-Stokes du TP FNO.
+
+### RNN / GRU / LSTM : ce qu'il faut retenir
+
+| | RNN | GRU | LSTM |
+|---|---|---|---|
+| Etats internes | $h_t$ | $h_t$ | $h_t$ et $c_t$ |
+| Portes | aucune | 2 (update, reset) | 3 (input, forget, output) |
+| Parametres (par unite) | $\sim H(H+D)$ | 3x | 4x |
+| Dependances longues | mauvais | bon | bon |
+
+Le probleme du RNN simple : $h_t = \tanh(W h_{t-1} + \dots)$, donc le gradient
+est multiplie par $W$ a chaque pas de la retropropagation. Sur 100 pas, cela
+donne $W^{100}$ : le gradient explose ou s'evanouit selon les valeurs propres.
+
+La solution du LSTM/GRU : une **route additive** pour la memoire.
+Dans le LSTM, $c_t = f_t \odot c_{t-1} + i_t \odot \tilde{c}_t$ - si la porte
+d'oubli $f_t$ est proche de 1, l'information (et le gradient) traverse le temps
+presque intacte. C'est la meme idee que les connexions residuelles des ResNet,
+appliquee a l'axe temporel.
+"""

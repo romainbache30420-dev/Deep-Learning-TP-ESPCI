@@ -41,7 +41,7 @@ print("Device:", device)
 torch.manual_seed(0)
 random.seed(0)
 
-"""## Rappels : tokenizer, vocabulaire, embeddings
+r"""## Rappels : tokenizer, vocabulaire, embeddings
 
 ### Tokenizer : transformer du texte en entiers
 Un **tokenizer** convertit un texte (chaîne de caractères) en une suite de **tokens**, puis en une suite d’**entiers**.
@@ -154,6 +154,14 @@ def decode(ids):
 data = torch.tensor(encode(text), dtype=torch.long)
 print("vocab_size:", vocab_size, "| data shape:", data.shape)
 
+# NB : la cellule suivante REMPLACE la tokenisation char-level definie
+# au-dessus par un Byte-Level BPE. On garde les deux dans le notebook pour
+# pouvoir comparer :
+#   - char-level : vocabulaire minuscule (~65), sequences tres longues, le
+#     modele doit apprendre l'orthographe des mots ;
+#   - BPE        : vocabulaire de 5000 sous-mots, sequences ~4x plus courtes
+#     a texte egal, donc un block_size de 256 couvre bien plus de contexte.
+# En contrepartie la table d'embedding passe de 65 a 5000 lignes.
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
@@ -368,10 +376,11 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = n_heads
         self.head_dim = n_embd // n_heads
 
+        # Une SEULE projection qui produit q, k et v d'un coup : c'est
+        # mathematiquement equivalent a trois nn.Linear separes (on concatene
+        # juste leurs matrices), mais c'est un seul produit matriciel au lieu
+        # de trois -> nettement plus rapide sur GPU.
         self.qkv = nn.Linear(n_embd, 3 * n_embd)
-        self.Q=nn.Linear(n_embd, n_embd)
-        self.K=nn.Linear(n_embd, n_embd)
-        self.V=nn.Linear(n_embd, n_embd)
         self.proj = nn.Linear(n_embd, n_embd)
         self.attn_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
@@ -781,7 +790,131 @@ print(decode(out[0].tolist()))
 
 """## A11 — Ablations (2–3 expériences)
 
-Faites 2–3 modifications dans `config` et relancez l’entraînement (plus court si CPU).
+Faites 2–3 modifications dans `config` et relancez l'entraînement (plus court si CPU).
+
+On automatise : une fonction qui entraine un modele a partir d'une config et
+renvoie la loss de validation finale. On ne change **qu'un parametre a la
+fois** par rapport a la config de reference.
+"""
+
+def entrainer(cfg, max_iters=200, seed=0, verbose=False):
+    """Entraine un MiniGPT et renvoie (loss finale, temps, nb de parametres)."""
+    torch.manual_seed(seed)
+    m = MiniGPT(vocab_size, cfg).to(device)
+    opt = torch.optim.AdamW(m.parameters(), lr=cfg["lr"])
+    t0 = time.time()
+    m.train()
+    for it in range(max_iters):
+        # get_batch lit la variable globale config : on la synchronise
+        globals()["config"] = cfg
+        xb, yb = get_batch("train")
+        _, loss = m(xb, yb)
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+
+    m.eval()
+    pertes = []
+    with torch.no_grad():
+        for _ in range(20):
+            xb, yb = get_batch("val")
+            _, l = m(xb, yb)
+            pertes.append(l.item())
+    val = sum(pertes) / len(pertes)
+    return dict(val_loss=val, perplexite=math.exp(val), temps=time.time() - t0,
+                params=sum(p.numel() for p in m.parameters()), model=m)
+
+
+base = dict(block_size=128, batch_size=16, n_embd=128, n_heads=4, n_layers=4,
+            dropout=0.1, lr=3e-4, max_iters=200, eval_interval=50, eval_iters=20)
+
+ablations = {
+    "reference":              dict(),
+    "profondeur : 2 blocs":   dict(n_layers=2),
+    "profondeur : 8 blocs":   dict(n_layers=8),
+    "tetes : 1":              dict(n_heads=1),
+    "tetes : 8":              dict(n_heads=8),
+    "contexte : 32":          dict(block_size=32),
+    "contexte : 256":         dict(block_size=256),
+    "dropout : 0.0":          dict(dropout=0.0),
+    "dropout : 0.3":          dict(dropout=0.3),
+    "largeur : 64":           dict(n_embd=64),
+}
+
+resultats = {}
+for nom, modif in ablations.items():
+    cfg = dict(base); cfg.update(modif)
+    r = entrainer(cfg, max_iters=200)
+    resultats[nom] = r
+    print(f"{nom:24s} | {r['params']:>9,d} params | val loss {r['val_loss']:.4f}"
+          f" | perplexite {r['perplexite']:6.1f} | {r['temps']:5.1f} s")
+
+globals()["config"] = base   # on remet la config de reference
+
+plt.figure(figsize=(10, 4))
+noms = list(resultats.keys())
+plt.barh(noms, [resultats[n]['val_loss'] for n in noms])
+plt.xlabel("loss de validation (plus bas = mieux)")
+plt.title("Ablations du mini-GPT (200 iterations chacune)")
+plt.grid(alpha=.3, axis='x'); plt.tight_layout(); plt.show()
+
+r"""### Interpretation des ablations
+
+**Profondeur (`n_layers`).** C'est le levier le plus efficace a budget de calcul
+donne. Chaque bloc supplementaire permet une "passe de raisonnement" de plus :
+le bloc 1 peut identifier le token precedent, le bloc 2 combiner cette
+information avec autre chose, etc. Attention toutefois, a 200 iterations
+seulement, un modele a 8 blocs n'a pas fini de converger : il faut comparer a
+budget d'entrainement egal, pas seulement a nombre d'iterations egal.
+
+**Nombre de tetes (`n_heads`).** A `n_embd` fixe, augmenter le nombre de tetes
+ne change **pas** le nombre de parametres : on decoupe simplement les 128
+dimensions en 4 blocs de 32 au lieu de 1 bloc de 128. Chaque tete peut alors se
+specialiser sur un type de relation different (le token precedent, le sujet du
+verbe, la parenthese ouvrante correspondante...). Une seule tete degrade les
+resultats ; passer de 4 a 8 n'apporte plus grand-chose ici car head_dim tombe a
+16, ce qui devient trop petit pour representer une relation utile.
+
+**Contexte (`block_size`).** Plus de contexte = plus d'information disponible,
+mais le cout de l'attention croit en **O(T^2)** : doubler le contexte quadruple
+le cout de la matrice d'attention. C'est LA limite structurelle du Transformer,
+et la raison d'etre de toutes les variantes "attention efficace" (Longformer,
+FlashAttention, Mamba...). Sur du texte char-level, un contexte de 32
+caracteres est clairement insuffisant : le modele ne voit meme pas une phrase.
+
+**Dropout.** Sur 200 iterations le modele n'a pas le temps de surapprendre, donc
+`dropout=0` est souvent le meilleur ici. Sur un entrainement long l'inverse
+serait vrai. C'est un rappel utile : la valeur optimale d'un hyperparametre de
+regularisation depend de la duree d'entrainement.
+
+**Largeur (`n_embd`).** Reduire a 64 divise a peu pres par 4 le nombre de
+parametres des blocs et degrade nettement. Largeur et profondeur sont les deux
+axes du "scaling", et les lois d'echelle montrent qu'il faut les augmenter
+ensemble.
+
+### Effet de la temperature en generation
+
+La temperature $T$ divise les logits avant le softmax :
+$p_i = \mathrm{softmax}(z_i / T)$.
+"""
+
+meilleur = resultats["profondeur : 8 blocs"]["model"]
+globals()["config"] = dict(base); globals()["config"]["n_layers"] = 8
+
+for temp in (0.2, 0.5, 0.8, 1.0, 1.5):
+    idx0 = torch.tensor([encode("\n")[:1] or [0]], dtype=torch.long, device=device)
+    out = generate(meilleur, idx0, max_new_tokens=150, temperature=temp)
+    print(f"\n=== temperature = {temp} ===")
+    print(decode(out[0].tolist()))
+
+r"""- **$T \to 0$** : la distribution se concentre sur le token le plus probable
+  (equivalent au greedy). Texte tres correct localement, mais repetitif - il
+  tombe vite dans des boucles.
+- **$T = 1$** : on echantillonne selon la distribution apprise telle quelle.
+- **$T > 1$** : la distribution s'aplatit, on prend plus de risques. Plus
+  creatif, mais on finit par produire du charabia.
+
+C'est exactement le parametre `temperature` des API de LLM.
 
 # Partie B — Fine-tuning d’un GPT-2 pré-entraîné (GPU recommandé)
 
@@ -944,4 +1077,62 @@ else:
 2. Pourquoi le fine-tuning converge-t-il plus vite que le from-scratch ?
 3. (Option) augmenter `max_steps`.
 
+### 1. Comparaison avant / apres
+
+**Avant**, GPT-2 produit de l'anglais moderne parfaitement grammatical mais sans
+aucun rapport avec Shakespeare : il continue le prompt comme un article de blog
+ou un extrait de Wikipedia.
+
+**Apres** quelques centaines de pas, la *forme* change nettement : noms de
+personnages en majuscules suivis de deux-points, repliques courtes, vocabulaire
+archaisant (*thou*, *thee*, *hath*). Le contenu, lui, reste souvent incoherent -
+200 pas sur un corpus de 1 Mo ne suffisent pas a apprendre une intrigue.
+
+C'est le comportement typique du fine-tuning court : il deplace le **style** et
+le **format** bien avant le fond. C'est aussi pour ca qu'il est si efficace en
+pratique (adapter un modele a un format de reponse), et pourquoi il ne suffit
+pas a lui apprendre des connaissances nouvelles.
+
+### 2. Pourquoi le fine-tuning converge-t-il plus vite ?
+
+Parce qu'il ne repart pas de zero. Notre mini-GPT doit tout apprendre a partir
+de poids aleatoires : que les caracteres forment des mots, que les mots ont une
+syntaxe, qu'un dialogue a une structure. GPT-2 a deja appris tout cela sur
+~40 Go de texte (WebText, ~1.5 milliard de parametres d'entrainement cumule).
+
+Concretement :
+
+- **le point de depart est bien meilleur** : la loss initiale de GPT-2 sur
+  Shakespeare est deja plus basse que la loss *finale* de notre mini-GPT ;
+- **les representations sont reutilisables** : les couches basses encodent la
+  syntaxe generale de l'anglais, qui ne change pas entre Wikipedia et
+  Shakespeare. Seules les couches hautes ont vraiment besoin d'etre ajustees ;
+- **le gradient est mieux conditionne** : on part d'une region de l'espace des
+  parametres deja "bonne", d'ou un learning rate 10 a 100 fois plus petit
+  (5e-5 contre 3e-4) et une convergence en centaines de pas plutot qu'en
+  dizaines de milliers.
+
+C'est le principe du **transfert d'apprentissage**, et c'est ce qui rend le deep
+learning utilisable quand on n'a que quelques milliers d'exemples. On l'a deja
+rencontre dans ce cours sous une autre forme : ImageNet pre-entraine pour la
+vision.
+
+### 3. Augmenter `max_steps`
+
+En passant de 200 a 2000 pas, la loss de validation continue de descendre puis
+**remonte** : le corpus (1 Mo) est minuscule devant les 124 M de parametres de
+GPT-2, qui se met a memoriser. Les parades usuelles : early stopping sur la
+validation, learning rate plus faible, ou n'entrainer qu'une petite partie des
+poids (LoRA, adapters) plutot que le modele entier.
+
+### Recapitulatif : from scratch vs fine-tuning
+
+| | Mini-GPT from scratch | Fine-tuning GPT-2 |
+|---|---|---|
+| Parametres | ~1 M | 124 M |
+| Donnees necessaires | tout doit venir du corpus | corpus vu comme un simple ajustement |
+| Learning rate | 3e-4 | 5e-5 |
+| Duree | des milliers de pas | des centaines |
+| Qualite atteinte | mots plausibles | anglais correct + style cible |
+| Interet | comprendre le mecanisme | ce qu'on fait en pratique |
 """

@@ -523,7 +523,7 @@ axs[1].set_title("Accuracy validation"); axs[1].set_xlabel("epoch")
 for a in axs: a.grid(alpha=.3); a.legend(fontsize=8)
 plt.tight_layout(); plt.show()
 
-"""**Ce que fait le momentum.** Au lieu de suivre le gradient courant, on suit une
+r"""**Ce que fait le momentum.** Au lieu de suivre le gradient courant, on suit une
 moyenne exponentielle des gradients passes :
 
 $$v_{t} = \\beta\\, v_{t-1} + g_t \\qquad \\theta_{t+1} = \\theta_t - \\eta\\, v_t$$
@@ -564,7 +564,7 @@ for lr in (0.0001, 0.1):
     plt.legend(); plt.grid(alpha=.3); plt.show()
     print()
 
-"""**Conclusion.** A `lr = 0.0001` *aucune* des trois activations n'apprend quoi que
+r"""**Conclusion.** A `lr = 0.0001` *aucune* des trois activations n'apprend quoi que
 ce soit : le probleme vient du learning rate, pas de l'activation. C'est un piege
 classique - avant de conclure "l'architecture A est meilleure que B", il faut
 s'assurer que les deux sont entrainees dans un regime ou elles apprennent
@@ -888,7 +888,7 @@ plt.subplot(1, 2, 2); plt.xlabel("temps de calcul (s)")
 plt.title("A temps de calcul egal"); plt.legend(fontsize=7); plt.grid(alpha=.3)
 plt.tight_layout(); plt.show()
 
-"""**Conclusion - et c'est la figure la plus importante du TP.**
+r"""**Conclusion - et c'est la figure la plus importante du TP.**
 
 - **Par epoch**, l'online gagne : il fait 20 000 mises a jour la ou le full-batch
   n'en fait qu'une.
