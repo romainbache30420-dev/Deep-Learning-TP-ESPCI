@@ -1,111 +1,109 @@
-# Deep Learning — TP ESPCI
+# Deep Learning — ESPCI Lab Assignments
 
-Sept travaux pratiques de deep learning en PyTorch, réalisés à l'ESPCI Paris,
-allant de la régression linéaire à la main jusqu'aux *neural operators* pour la
-résolution d'EDP. Les notebooks ont été complétés, corrigés et commentés après
-les séances : chaque section porte les résultats obtenus et leur interprétation.
+Seven PyTorch deep learning labs completed at ESPCI Paris, running from linear
+regression written by hand up to neural operators for solving PDEs. The
+notebooks were completed, corrected and annotated after the sessions: every
+section carries the results actually obtained and their interpretation.
 
 ---
 
-## Les TP
+## The labs
 
-| # | Notebook | Sujet | Notions clés |
+| # | Notebook | Topic | Key concepts |
 |---|---|---|---|
-| 01 | [Introduction à PyTorch](notebooks/01_intro_pytorch.py) | Tenseurs, autograd, régression linéaire et logistique | `backward()`, `Optimizer`, `Module`, BCE, mode batch vs stochastique |
-| 02 | [MLP sur Fashion-MNIST](notebooks/02_mlp_fashion_mnist.py) | Réseaux feed-forward, classification d'images | Activations, momentum, BatchNorm, Dropout, overfitting, découpage train/valid/test |
-| 03 | [CNN et convolutions 2D](notebooks/03_cnn_conv2d.py) | Classification d'images par convolutions | `Conv2d`, padding, MaxPool, champ receptif, VGG-16, data augmentation |
-| 04 | [U-Net et segmentation](notebooks/04_unet_segmentation.py) | Segmentation de noyaux cellulaires | Encodeur/décodeur, `ConvTranspose2d`, skip connections, précision/rappel, IoU |
-| 05 | [RNN, GRU et LSTM](notebooks/05_rnn_gru_lstm_meteo.py) | Prévision météo sur séries temporelles | Portes, BPTT, teacher forcing, rollout autorégressif, scheduled sampling |
-| 06 | [Transformers — mini-GPT](notebooks/06_transformers_minigpt.py) | Modèle de langage causal *from scratch*, puis fine-tuning de GPT-2 | Self-attention, masque causal, multi-head, LayerNorm, tokenisation BPE, transfert |
-| 07 | [Fourier Neural Operator](notebooks/07_fourier_neural_operator.py) | Résolution de l'équation de Darcy par apprentissage d'opérateur | FFT, troncature spectrale, invariance à la discrétisation, losses L2 et H1 |
+| 01 | [Introduction to PyTorch](notebooks/01_intro_pytorch.py) | Tensors, autograd, linear and logistic regression | `backward()`, `Optimizer`, `Module`, BCE, batch vs stochastic mode |
+| 02 | [MLP on Fashion-MNIST](notebooks/02_mlp_fashion_mnist.py) | Feed-forward networks, image classification | Activations, momentum, BatchNorm, Dropout, overfitting, train/valid/test split |
+| 03 | [CNNs and 2D convolutions](notebooks/03_cnn_conv2d.py) | Image classification with convolutions | `Conv2d`, padding, MaxPool, receptive field, VGG-16, data augmentation |
+| 04 | [U-Net and segmentation](notebooks/04_unet_segmentation.py) | Cell nucleus segmentation | Encoder/decoder, `ConvTranspose2d`, skip connections, precision/recall, IoU |
+| 05 | [RNN, GRU and LSTM](notebooks/05_rnn_gru_lstm_meteo.py) | Weather forecasting on time series | Gates, BPTT, teacher forcing, autoregressive rollout, scheduled sampling |
+| 06 | [Transformers — mini-GPT](notebooks/06_transformers_minigpt.py) | Causal language model from scratch, then GPT-2 fine-tuning | Self-attention, causal mask, multi-head, LayerNorm, BPE tokenisation, transfer |
+| 07 | [Fourier Neural Operator](notebooks/07_fourier_neural_operator.py) | Solving the Darcy equation by operator learning | FFT, spectral truncation, discretisation invariance, L2 and H1 losses |
 
-### Fil conducteur
+### The common thread
 
-Les sept TP racontent une même histoire : **le bon modèle est celui dont
-l'architecture encode les bonnes invariances du problème.**
+The seven labs tell a single story: **the right model is the one whose
+architecture encodes the right invariances of the problem.**
 
-| Structure du problème | Architecture | Invariance encodée |
+| Problem structure | Architecture | Invariance encoded |
 |---|---|---|
-| Aucune (vecteurs quelconques) | MLP | — |
-| Voisinage local, motifs répétés | CNN | translation spatiale |
-| Séquence ordonnée | RNN / GRU / LSTM | translation temporelle |
-| Relations à longue portée | Transformer | permutation (+ positions ajoutées) |
-| Fonction sur un domaine continu | FNO | discrétisation |
+| None (arbitrary vectors) | MLP | — |
+| Local neighbourhoods, repeated patterns | CNN | spatial translation |
+| Ordered sequence | RNN / GRU / LSTM | temporal translation |
+| Long-range relationships | Transformer | permutation (positions added back) |
+| Function on a continuous domain | FNO | discretisation |
 
 ---
 
-## Organisation du dépôt
+## Repository layout
 
 ```
-notebooks/          les TP, au format .py (source de référence, lisible dans git)
-notebooks/ipynb/    les mêmes TP au format .ipynb, générés — ouvrables dans Colab
-tools/              utilitaires (conversion .py -> .ipynb, nettoyage)
+notebooks/          the labs as .py files (reference source, readable in git)
+notebooks/ipynb/    the same labs as generated .ipynb files — open them in Colab
+tools/              utilities (.py -> .ipynb conversion, cleanup)
 ```
 
-Les fichiers `.py` sont la **source de référence** : ils se relisent et se
-comparent proprement dans git, contrairement au JSON des `.ipynb`. Ils suivent
-la convention d'export de Colab (les cellules Markdown sont des docstrings de
-module), et les notebooks sont régénérés à la demande :
+The `.py` files are the **reference source**: they read and diff cleanly in git,
+unlike the JSON behind `.ipynb`. They follow the Colab export convention
+(Markdown cells are module docstrings), and the notebooks are regenerated on
+demand:
 
 ```bash
 python tools/py2ipynb.py
 ```
 
-## Exécuter les TP
+## Running the labs
 
-Le plus simple est **Google Colab** : ouvrir un fichier de `notebooks/ipynb/`
-via *Fichier > Importer un notebook*. Les TP 03 (VGG-16), 06 (fine-tuning de
-GPT-2) et 07 (FNO) demandent un GPU ; les autres tournent sur CPU. Chaque
-notebook télécharge lui-même ses données.
+The simplest route is **Google Colab**: open a file from `notebooks/ipynb/` via
+*File > Upload notebook*. Labs 03 (VGG-16), 06 (GPT-2 fine-tuning) and 07 (FNO)
+need a GPU; the others run on CPU. Each notebook downloads its own data.
 
-En local :
+Locally:
 
 ```bash
 pip install -r requirements.txt
 jupyter notebook notebooks/ipynb/
 ```
 
-## Jeux de données
+## Datasets
 
-| TP | Jeu de données | Provenance |
+| Lab | Dataset | Source |
 |---|---|---|
-| 02, 03 | Fashion-MNIST | téléchargé automatiquement (Google Drive) |
+| 02, 03 | Fashion-MNIST | downloaded automatically (Google Drive) |
 | 03 | CIFAR-10 | `torchvision.datasets` |
-| 04 | Noyaux cellulaires en microscopie | [Kromp et al., *Scientific Data* 2020](https://www.nature.com/articles/s41597-020-00608-w) |
-| 05 | SYNOP — relevés météo d'Orly, toutes les 3 h | [public.opendatasoft.com](https://public.opendatasoft.com/explore/dataset/donnees-synop-essentielles-omm/) |
+| 04 | Cell nuclei in microscopy images | [Kromp et al., *Scientific Data* 2020](https://www.nature.com/articles/s41597-020-00608-w) |
+| 05 | SYNOP — Orly weather records, every 3 h | [public.opendatasoft.com](https://public.opendatasoft.com/explore/dataset/donnees-synop-essentielles-omm/) |
 | 06 | Tiny Shakespeare | [karpathy/char-rnn](https://github.com/karpathy/char-rnn) |
-| 07 | Darcy Flow, Navier-Stokes 2D | `neuraloperator` |
+| 07 | Darcy Flow, 2D Navier-Stokes | `neuraloperator` |
 
-Les données ne sont pas versionnées (voir `.gitignore`) : les notebooks les
-récupèrent au premier lancement.
+Data is not versioned (see `.gitignore`): the notebooks fetch it on first run.
 
 ---
 
-## Historique
+## History
 
-Le premier commit contient les exports Colab **bruts**, tels que rendus pendant
-les séances. Les commits suivants apportent les corrections et les sections
-manquantes, ce qui permet de comparer les deux états :
+The first commit holds the **raw** Colab exports, exactly as produced during the
+sessions. Later commits add the corrections and the missing sections, so the two
+states can be compared directly:
 
 ```bash
 git diff 97cc70e -- notebooks/
 ```
 
-Quelques bugs relevés au passage, instructifs en eux-mêmes :
+A few bugs found along the way, instructive in their own right:
 
-- **TP 04** — l'encodeur renvoyait les features *après* le max-pooling. Les skip
-  connections ne pouvaient donc pas remplir leur rôle : elles existent
-  précisément pour réinjecter les détails à pleine résolution.
-- **TP 05** — `init_hidden` utilisait `input.dtype`, la fonction native de
-  Python, au lieu de `inputs.dtype`. L'erreur passait inaperçue parce que
-  `forward()` recréait l'état caché juste après.
-- **TP 07** — `config["opt"]["training_loss"] == "l2"` : un `==` au lieu d'un
-  `=`. La ligne ne modifiait rien, et **toutes les ablations L2 / H1 comparaient
-  en réalité des modèles entraînés avec la même loss.** Un `=` n'aurait
-  d'ailleurs pas suffi, la fonction d'entraînement lisant une variable globale
-  et non le dictionnaire de configuration.
+- **Lab 04** — the encoder returned its features *after* max-pooling. The skip
+  connections therefore could not do their job, which is precisely to feed
+  full-resolution detail back into the decoder.
+- **Lab 05** — `init_hidden` used `input.dtype`, Python's built-in function,
+  instead of `inputs.dtype`. The error went unnoticed because `forward()`
+  recreated the hidden state immediately afterwards.
+- **Lab 07** — `config["opt"]["training_loss"] == "l2"`: a `==` where a `=` was
+  meant. The line changed nothing, so **every L2 / H1 ablation was in fact
+  comparing models trained with the same loss.** A `=` alone would not have
+  fixed it either, since the training function reads a global variable rather
+  than the configuration dictionary.
 
-## Licence
+## License
 
-Code sous licence MIT (voir [LICENSE](LICENSE)). Les énoncés et le texte des
-sujets restent la propriété de leurs auteurs à l'ESPCI.
+Code released under the MIT license (see [LICENSE](LICENSE)). The problem
+statements and assignment text remain the property of their authors at ESPCI.
